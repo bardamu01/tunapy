@@ -98,12 +98,20 @@ class ConnectWorker(Worker):
 						host = match.group(1)
 						port = long(match.group(2))
 						print("Connect requested to: %s:%s" % (host, port))
-						serverSocket = self.connectTo(host, port)
-						clientSocket.sendall("HTTP/1.1 200 Connection established\r\nProxy-Agent: Proxy.PY/0.1\r\n\r\n")
+						try:
+							serverSocket = self.connectTo(host, port)
+						except Exception, why:
+							sys.stderr.write(str(why) + "\n")
+							clientSocket.sendall("HTTP/1.1 404 Connection failed\r\n\r\n")
+							clientSocket.shutdown(socket.SHUT_RDWR)
+							clientSocket.close()
+
+						clientSocket.sendall("HTTP/1.1 200 Connection established\r\nProxy-Agent: TunaPy/0.1\r\n\r\n")
 						self.forwardingQueue.put( (reduce_handle(clientSocket.fileno()),
 												   reduce_handle(serverSocket.fileno())) )
 						break
 				else:
+					clientSocket.shutdown(socket.SHUT_RDWR)
 					clientSocket.close()
 					break
 
@@ -175,6 +183,7 @@ class ForwardingWorker(Worker):
 				else:
 					self.__removePair(readable)
 					readable.close()
+					other_end.shutdown(socket.SHUT_RDWR)
 					other_end.close()
 
 			self.__getNewConnection()
