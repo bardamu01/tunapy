@@ -113,7 +113,7 @@ class ConnectWorker(Worker):
 
 class ForwardingWorker(Worker):
 	"""
-	Forwards packets between clients and servers.
+	Forwards packets between multiple socket pairs (client & server).
 	"""
 
 	sockets = [] #holds client, server sockets for select()
@@ -124,13 +124,13 @@ class ForwardingWorker(Worker):
 		self.sockets = []
 		self.socket2socket = {}
 
-	def __add_pair(self, clientSocket, serverSocket):
+	def __addPair(self, clientSocket, serverSocket):
 		print("Adding client & server pair %s, %s" % (clientSocket, serverSocket))
 		self.sockets.extend([clientSocket, serverSocket])
 		self.socket2socket[serverSocket] = clientSocket
 		self.socket2socket[clientSocket] = serverSocket
 
-	def __remove_pair(self, oneend):
+	def __removePair(self, oneend):
 		print("Removing socket %s" % oneend)
 		otherend = self.socket2socket[oneend]
 		self.sockets.remove(oneend)
@@ -150,16 +150,17 @@ class ForwardingWorker(Worker):
 		serverSocket = socket.fromfd(rebuild_handle(serverHandle), socket.AF_INET, socket.SOCK_STREAM)
 		self.forwardingQueue.task_done()
 
-		self.__add_pair(clientSocket, serverSocket)
+		self.__addPair(clientSocket, serverSocket)
 
 
 	def work(self):
+		self.running = True
 		print("%s started working..." % self)
 
 		self.__getNewConnection(block=True)
 
 		sockets = self.sockets
-		while 1:
+		while self.running:
 			# TODO: if we wait here we may never get a new connection
 			readables, writables, exceptions = select.select(sockets, [], sockets)
 
@@ -172,7 +173,7 @@ class ForwardingWorker(Worker):
 				if buf:
 					other_end.sendall(buf)
 				else:
-					self.__remove_pair(readable)
+					self.__removePair(readable)
 					readable.close()
 					other_end.close()
 
@@ -181,7 +182,9 @@ class ForwardingWorker(Worker):
 
 
 def main():
-
+	"""
+	Main entry point.
+	"""
 	signal.signal(signal.SIGTERM, signalHandler)
 
 	connectRequestsQueue = JoinableQueue(20)
