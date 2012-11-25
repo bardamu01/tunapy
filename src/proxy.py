@@ -9,6 +9,7 @@ Architecture:
 * one or more connect workers make the connections
 * several workers forward the packets. One worker can serve multiple connections.
 """
+from Queue import Empty
 
 from multiprocessing.reduction import reduce_handle, rebuild_handle
 import select
@@ -37,6 +38,8 @@ class Worker(object):
 	"""
 	Base class for workers.
 	"""
+
+	running = False
 
 	def __init__(self, name):
 		self.name = name
@@ -77,32 +80,32 @@ class ConnectWorker(Worker):
 		return serverSocket
 
 	def work(self):
+		self.running = True
 		print("%s started working..." % self)
 
-		clientHandle, clientAddr = self.connectRequestsQueue.get()
-		print("working with: ", clientAddr)
-		fd = rebuild_handle(clientHandle)
-		clientSocket = socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM)
-		all = ""
-		while 1:
-			buf = clientSocket.recv(1024)
-			print("Received %s" % buf)
-			if buf:
-				match = re.search('CONNECT ([^ ]*):([0-9]*) HTTP/1.1', buf)
-				if match:
-					host = match.group(1)
-					port = long(match.group(2))
-					print("Connect requested to: %s:%s" % (host, port))
-					serverSocket = self.connectTo(host, port)
-					clientSocket.sendall("HTTP/1.1 200 Connection established\r\nProxy-Agent: Proxy.PY/0.1\r\n\r\n")
-					self.forwardingQueue.put( (reduce_handle(clientSocket.fileno()),
-											   reduce_handle(serverSocket.fileno())) )
-					break
+		while self.running:
+			clientHandle, clientAddress = self.connectRequestsQueue.get()
+			print("Working with: ", clientAddress)
+			clientSocket = socket.fromfd(rebuild_handle(clientHandle), socket.AF_INET, socket.SOCK_STREAM)
+			all = ""
+			while self.running:
+				buf = clientSocket.recv(1024)
+				print("Received %s" % buf)
+				if buf:
+					all+=buf
+					match = re.search('CONNECT ([^ ]*):([0-9]*) HTTP/1.1', all)
+					if match:
+						host = match.group(1)
+						port = long(match.group(2))
+						print("Connect requested to: %s:%s" % (host, port))
+						serverSocket = self.connectTo(host, port)
+						clientSocket.sendall("HTTP/1.1 200 Connection established\r\nProxy-Agent: Proxy.PY/0.1\r\n\r\n")
+						self.forwardingQueue.put( (reduce_handle(clientSocket.fileno()),
+												   reduce_handle(serverSocket.fileno())) )
+						break
 				else:
-					all.append(buf)
-			else:
-				clientSocket.close()
-				break
+					clientSocket.close()
+					break
 
 		self.forwardingQueue.join()
 		print("%s quitting..." % self)
@@ -110,48 +113,70 @@ class ConnectWorker(Worker):
 
 class ForwardingWorker(Worker):
 	"""
-	Handles packets' forwarding between client and server.
+	Forwards packets between clients and servers.
 	"""
+
+	sockets = [] #holds client, server sockets for select()
 
 	def __init__(self, name, forwardingQueue):
 		Worker.__init__(self, "Forward worker "+ name)
 		self.forwardingQueue = forwardingQueue
+		self.sockets = []
+		self.socket2socket = {}
+
+	def __add_pair(self, clientSocket, serverSocket):
+		print("Adding client & server pair %s, %s" % (clientSocket, serverSocket))
+		self.sockets.extend([clientSocket, serverSocket])
+		self.socket2socket[serverSocket] = clientSocket
+		self.socket2socket[clientSocket] = serverSocket
+
+	def __remove_pair(self, oneend):
+		print("Removing socket %s" % oneend)
+		otherend = self.socket2socket[oneend]
+		self.sockets.remove(oneend)
+		self.sockets.remove(otherend)
+		self.socket2socket.pop(oneend)
+		self.socket2socket.pop(otherend)
+
+	def __getNewConnection(self, block=False):
+		if block:
+			clientHandle, serverHandle = self.forwardingQueue.get()
+		else:
+			try:
+				clientHandle, serverHandle = self.forwardingQueue.get_nowait()
+			except Empty:
+				return
+		clientSocket = socket.fromfd(rebuild_handle(clientHandle), socket.AF_INET, socket.SOCK_STREAM)
+		serverSocket = socket.fromfd(rebuild_handle(serverHandle), socket.AF_INET, socket.SOCK_STREAM)
+		self.forwardingQueue.task_done()
+
+		self.__add_pair(clientSocket, serverSocket)
+
 
 	def work(self):
 		print("%s started working..." % self)
 
-		clientHandle, serverHandle = self.forwardingQueue.get()
-		clientSocket = socket.fromfd(rebuild_handle(clientHandle), socket.AF_INET, socket.SOCK_STREAM)
-		serverSocket = socket.fromfd(rebuild_handle(serverHandle), socket.AF_INET, socket.SOCK_STREAM)
-		self.forwardingQueue.task_done()
-		print("Have a client")
-		sockets = [clientSocket, serverSocket]
+		self.__getNewConnection(block=True)
+
+		sockets = self.sockets
 		while 1:
-			try:
-				readables, writables, exceptions = select.select(sockets, [], [])
-			except ValueError, why:
-				sys.stderr.write(str(why))
-				clientSocket.close()
-				serverSocket.close()
-				break
+			# TODO: if we wait here we may never get a new connection
+			readables, writables, exceptions = select.select(sockets, [], sockets)
+
+			for exception in exceptions:
+				sys.stderr.write(str(exception) + "\n")
 
 			for readable in readables:
-				if readable is clientSocket:
-					buf = clientSocket.recv(1024)
-					if buf:
-						serverSocket.sendall(buf)
-					else:
-						clientSocket.close()
-						serverSocket.close()
-						break
-				elif readable is serverSocket:
-					buf = serverSocket.recv(1024)
-					if buf:
-						clientSocket.sendall(buf)
-					else:
-						clientSocket.close()
-						serverSocket.close()
-						break
+				buf = readable.recv(1024)
+				other_end = self.socket2socket[readable]
+				if buf:
+					other_end.sendall(buf)
+				else:
+					self.__remove_pair(readable)
+					readable.close()
+					other_end.close()
+
+			self.__getNewConnection()
 		print("%s quitting...")
 
 
