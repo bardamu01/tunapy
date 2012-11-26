@@ -9,23 +9,22 @@ Architecture:
 * one or more connect workers make the connections
 * several workers forward the packets. One worker can serve multiple connections.
 """
-from Queue import Empty
-
-from multiprocessing.reduction import reduce_handle, rebuild_handle
-import select
 
 LISTEN_ADDRESS = '127.0.0.1'
 LISTEN_PORT = 8888
 
+
+import select
 import sys
 import socket
 import signal
 import re
 
+from Queue import Empty
+from multiprocessing.reduction import reduce_handle, rebuild_handle
 from multiprocessing import Process, JoinableQueue
 
 running = True
-
 def signalHandler(signum, frame):
 	global running
 	print("Received %d signal" % signum)
@@ -69,6 +68,10 @@ class ConnectWorker(Worker):
       Host: server.example.com:80
 	"""
 
+	HTTP_CONNECTION_FAILED = "HTTP/1.1 404 Connection failed\r\n\r\n"
+
+	__HOST_RE = re.compile('Host: ([^ :\r\n]*):?([0-9]{0,5})')
+
 	def __init__(self, name, connectRequestsQueue, forwardingQueue):
 		Worker.__init__(self, "Connect worker " + name)
 		self.connectRequestsQueue = connectRequestsQueue
@@ -97,16 +100,40 @@ class ConnectWorker(Worker):
 					if match:
 						host = match.group(1)
 						port = long(match.group(2))
-						print("Connect requested to: %s:%s" % (host, port))
+						print("Tunneling to: %s:%s" % (host, port))
+
 						try:
 							serverSocket = self.connectTo(host, port)
 						except Exception, why:
 							sys.stderr.write(str(why) + "\n")
-							clientSocket.sendall("HTTP/1.1 404 Connection failed\r\n\r\n")
+							clientSocket.sendall(self.HTTP_CONNECTION_FAILED)
 							clientSocket.shutdown(socket.SHUT_RDWR)
 							clientSocket.close()
+							break
 
 						clientSocket.sendall("HTTP/1.1 200 Connection established\r\nProxy-Agent: TunaPy/0.1\r\n\r\n")
+						self.forwardingQueue.put( (reduce_handle(clientSocket.fileno()),
+												   reduce_handle(serverSocket.fileno())) )
+						break
+
+					match = self.__HOST_RE.search(all)
+					if match:
+						# Not a CONNECT request
+						host = match.group(1)
+						port = 80
+						print('Proxying to %s:%d' % (host, port))
+						try:
+							serverSocket = self.connectTo(host, port)
+							# resend the client HTTP request to the server
+							serverSocket.sendall(all)
+						except Exception, why:
+							sys.stderr.write('An error occurred:\n%s\n' % str(why))
+							clientSocket.sendall(self.HTTP_CONNECTION_FAILED)
+							clientSocket.shutdown(socket.SHUT_RDWR)
+							clientSocket.close()
+							break
+
+						print("Forwarding queue size: %d" % self.forwardingQueue.qsize())
 						self.forwardingQueue.put( (reduce_handle(clientSocket.fileno()),
 												   reduce_handle(serverSocket.fileno())) )
 						break
@@ -138,13 +165,20 @@ class ForwardingWorker(Worker):
 		self.socket2socket[serverSocket] = clientSocket
 		self.socket2socket[clientSocket] = serverSocket
 
-	def __removePair(self, oneend):
-		print("Removing socket %s" % oneend)
-		otherend = self.socket2socket[oneend]
-		self.sockets.remove(oneend)
-		self.sockets.remove(otherend)
-		self.socket2socket.pop(oneend)
-		self.socket2socket.pop(otherend)
+	def __removePair(self, oneEnd):
+		print("Removing socket %s" % oneEnd)
+		otherEnd = self.socket2socket[oneEnd]
+		self.sockets.remove(oneEnd)
+		self.sockets.remove(otherEnd)
+		self.socket2socket.pop(oneEnd)
+		self.socket2socket.pop(otherEnd)
+
+	def __closeSocketPair(self, oneEnd, otherEnd):
+		print("Closing sockets: %s & %s" % (oneEnd, otherEnd))
+		self.__removePair(oneEnd)
+		oneEnd.close()
+		otherEnd.shutdown(socket.SHUT_RDWR)
+		otherEnd.close()
 
 	def __getNewConnection(self, block=False):
 		if block:
@@ -157,8 +191,8 @@ class ForwardingWorker(Worker):
 		clientSocket = socket.fromfd(rebuild_handle(clientHandle), socket.AF_INET, socket.SOCK_STREAM)
 		serverSocket = socket.fromfd(rebuild_handle(serverHandle), socket.AF_INET, socket.SOCK_STREAM)
 		self.forwardingQueue.task_done()
-
 		self.__addPair(clientSocket, serverSocket)
+
 
 
 	def work(self):
@@ -169,22 +203,29 @@ class ForwardingWorker(Worker):
 
 		sockets = self.sockets
 		while self.running:
-			# TODO: if we wait here we may never get a new connection
-			readables, writables, exceptions = select.select(sockets, [], sockets)
+			readables, writables, exceptions = select.select(sockets, [], sockets, 0.05)
 
 			for exception in exceptions:
-				sys.stderr.write(str(exception) + "\n")
+				sys.stderr.write("Encountered: %s\n" + str(exception))
 
 			for readable in readables:
-				buf = readable.recv(1024)
-				other_end = self.socket2socket[readable]
-				if buf:
-					other_end.sendall(buf)
+				if not self.socket2socket.has_key(readable):
+					continue
+				endpoint = self.socket2socket[readable]
+				if readable.fileno() != -1:
+					try:
+						buf = readable.recv(1024)
+					except Exception, why:
+						sys.stderr.write("Encountered while recv: %s\n" % str(why))
+						self.__closeSocketPair(readable, endpoint)
+						break
+					if buf:
+						endpoint.sendall(buf)
+					else:
+						self.__closeSocketPair(readable, endpoint)
 				else:
-					self.__removePair(readable)
-					readable.close()
-					other_end.shutdown(socket.SHUT_RDWR)
-					other_end.close()
+					sys.stderr.write("-1 fd on %s, closing\n" % readable)
+					self.__closeSocketPair(readable, endpoint)
 
 			self.__getNewConnection()
 		print("%s quitting...")
@@ -201,8 +242,9 @@ def main():
 
 	processes = []
 	print("Starting workers...")
-	workers = [ ConnectWorker("first", connectRequestsQueue, forwardingQueue),
-				ForwardingWorker("first", forwardingQueue)
+	workers = [ ConnectWorker("Adam", connectRequestsQueue, forwardingQueue),
+				ForwardingWorker("Fred", forwardingQueue),
+				#ForwardingWorker("Barney", forwardingQueue)
 			  ]
 	for worker in workers:
 		p = Process(target=worker.work, args=())
