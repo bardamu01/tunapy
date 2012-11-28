@@ -8,11 +8,13 @@ Architecture:
 * one listener listens on a port and places requests on a request queue
 * one or more connect workers make the connections
 * several workers forward the packets. One worker can serve multiple connections.
+
 """
+
+#TODO: GET mode is not OK, it has to handle every get request itself and not via a tunneled connection to the server
 
 LISTEN_ADDRESS = '127.0.0.1'
 LISTEN_PORT = 8888
-
 
 import select
 import sys
@@ -31,6 +33,44 @@ def signalHandler(signum, frame):
 	if signum == signal.SIGTERM:
 		running = False
 		print("Quiting")
+
+
+class Connection(object):
+
+	clientSocket = None
+	clientHandle = None
+	clientAddress = None
+	clientStats = 0
+
+	serverSocket = None
+	serverHandle = None
+	serverAddress = None
+	serverStats = 0
+
+	def __init__(self, clientSocket, clientAddress, serverSocket, serverAddress):
+		self.clientSocket = clientSocket
+		self.clientAddress = clientAddress
+		self.serverSocket = serverSocket
+		self.serverAddress = serverAddress
+
+	def reduce(self):
+		""" Prepares for serialization """
+		self.clientHandle = reduce_handle(self.clientSocket.fileno())
+		self.serverHandle = reduce_handle(self.serverSocket.fileno())
+		self.clientSocket = None
+		self.serverSocket = None
+		return self
+
+	def rebuild(self):
+		self.clientSocket = socket.fromfd(rebuild_handle(self.clientHandle), socket.AF_INET, socket.SOCK_STREAM)
+		self.serverSocket = socket.fromfd(rebuild_handle(self.serverHandle), socket.AF_INET, socket.SOCK_STREAM)
+		return self
+
+	def close(self):
+		print("Closing sockets: %s & %s" % (self.clientSocket, self.serverSocket))
+		self.clientSocket.close()
+		self.serverSocket.shutdown(socket.SHUT_RDWR)
+		self.serverSocket.close()
 
 
 class Worker(object):
@@ -112,8 +152,7 @@ class ConnectWorker(Worker):
 							break
 
 						clientSocket.sendall("HTTP/1.1 200 Connection established\r\nProxy-Agent: TunaPy/0.1\r\n\r\n")
-						self.forwardingQueue.put( (reduce_handle(clientSocket.fileno()),
-												   reduce_handle(serverSocket.fileno())) )
+						self.forwardingQueue.put( Connection(clientSocket, clientAddress, serverSocket, (host,port)).reduce())
 						break
 
 					match = self.__HOST_RE.search(all)
@@ -134,8 +173,7 @@ class ConnectWorker(Worker):
 							break
 
 						print("Forwarding queue size: %d" % self.forwardingQueue.qsize())
-						self.forwardingQueue.put( (reduce_handle(clientSocket.fileno()),
-												   reduce_handle(serverSocket.fileno())) )
+						self.forwardingQueue.put( Connection(clientSocket, clientAddress, serverSocket, (host,port)).reduce() )
 						break
 				else:
 					clientSocket.shutdown(socket.SHUT_RDWR)
@@ -158,12 +196,17 @@ class ForwardingWorker(Worker):
 		self.forwardingQueue = forwardingQueue
 		self.sockets = []
 		self.socket2socket = {}
+		self.socket2conn = {}
 
-	def __addPair(self, clientSocket, serverSocket):
+	def __addConnection(self, conn):
+		clientSocket = conn.clientSocket
+		serverSocket = conn.serverSocket
 		print("Adding client & server pair %s, %s" % (clientSocket, serverSocket))
 		self.sockets.extend([clientSocket, serverSocket])
 		self.socket2socket[serverSocket] = clientSocket
 		self.socket2socket[clientSocket] = serverSocket
+		self.socket2conn[serverSocket] = conn
+		self.socket2conn[clientSocket] = conn
 
 	def __removePair(self, oneEnd):
 		print("Removing socket %s" % oneEnd)
@@ -172,26 +215,25 @@ class ForwardingWorker(Worker):
 		self.sockets.remove(otherEnd)
 		self.socket2socket.pop(oneEnd)
 		self.socket2socket.pop(otherEnd)
+		self.socket2conn.pop(oneEnd)
+		self.socket2conn.pop(otherEnd)
 
-	def __closeSocketPair(self, oneEnd, otherEnd):
-		print("Closing sockets: %s & %s" % (oneEnd, otherEnd))
-		self.__removePair(oneEnd)
-		oneEnd.close()
-		otherEnd.shutdown(socket.SHUT_RDWR)
-		otherEnd.close()
+	def __closeConnection(self, conn):
+		self.__removePair(conn.clientSocket)
+		conn.close()
+
 
 	def __getNewConnection(self, block=False):
 		if block:
-			clientHandle, serverHandle = self.forwardingQueue.get()
+			connection = self.forwardingQueue.get()
 		else:
 			try:
-				clientHandle, serverHandle = self.forwardingQueue.get_nowait()
+				connection = self.forwardingQueue.get_nowait()
 			except Empty:
 				return
-		clientSocket = socket.fromfd(rebuild_handle(clientHandle), socket.AF_INET, socket.SOCK_STREAM)
-		serverSocket = socket.fromfd(rebuild_handle(serverHandle), socket.AF_INET, socket.SOCK_STREAM)
+		connection.rebuild()
 		self.forwardingQueue.task_done()
-		self.__addPair(clientSocket, serverSocket)
+		self.__addConnection(connection)
 
 
 
@@ -212,22 +254,24 @@ class ForwardingWorker(Worker):
 				if not self.socket2socket.has_key(readable):
 					continue
 				endpoint = self.socket2socket[readable]
+				conn = self.socket2conn[readable]
 				if readable.fileno() != -1:
 					try:
 						buf = readable.recv(1024)
 					except Exception, why:
 						sys.stderr.write("Encountered while recv: %s\n" % str(why))
-						self.__closeSocketPair(readable, endpoint)
+						self.__closeConnection(conn)
 						break
 					if buf:
 						endpoint.sendall(buf)
 					else:
-						self.__closeSocketPair(readable, endpoint)
+						self.__closeConnection(conn)
 				else:
 					sys.stderr.write("-1 fd on %s, closing\n" % readable)
-					self.__closeSocketPair(readable, endpoint)
+					self.__closeConnection(conn)
 
 			self.__getNewConnection()
+		# TODO: need to close all connections on exit
 		print("%s quitting...")
 
 
