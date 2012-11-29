@@ -53,6 +53,9 @@ class Connection(object):
 		self.serverSocket = serverSocket
 		self.serverAddress = serverAddress
 
+	def __str__(self):
+		return "Connection: %s -> %s " % (self.clientAddress, self.serverAddress)
+
 	def reduce(self):
 		""" Prepares for serialization """
 		self.clientHandle = reduce_handle(self.clientSocket.fileno())
@@ -77,11 +80,11 @@ class Worker(object):
 	"""
 	Base class for workers.
 	"""
-
+	_name = "Base worker"
 	running = False
 
 	def __init__(self, name):
-		self.name = name
+		self.name = self._name + " " + name
 
 	def __str__(self):
 		return self.name
@@ -89,8 +92,11 @@ class Worker(object):
 	def work(self):
 		raise NotImplementedError()
 
+HOST_RE = re.compile('Host: ([^ :\r\n]*):?([0-9]{0,5})')
+CONNECT_RE = re.compile('CONNECT ([^ ]*):([0-9]*) HTTP/1.1')
 
-class ConnectWorker(Worker):
+
+class SwitchWorker(Worker):
 	"""
 	Handles establishing the connection between the target and the server
 
@@ -108,14 +114,15 @@ class ConnectWorker(Worker):
       Host: server.example.com:80
 	"""
 
+	_name = "Switch worker"
+
 	HTTP_CONNECTION_FAILED = "HTTP/1.1 404 Connection failed\r\n\r\n"
 
-	__HOST_RE = re.compile('Host: ([^ :\r\n]*):?([0-9]{0,5})')
-
-	def __init__(self, name, connectRequestsQueue, forwardingQueue):
-		Worker.__init__(self, "Connect worker " + name)
+	def __init__(self, name, connectRequestsQueue, forwardingQueue, proxyingQueue):
+		Worker.__init__(self, name)
 		self.connectRequestsQueue = connectRequestsQueue
 		self.forwardingQueue = forwardingQueue
+		self.proxyingQueue = proxyingQueue
 
 	def connectTo(self, host, port):
 		serverSocket = socket.socket(socket.AF_INET, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
@@ -136,7 +143,7 @@ class ConnectWorker(Worker):
 				print("Received %s" % buf)
 				if buf:
 					all+=buf
-					match = re.search('CONNECT ([^ ]*):([0-9]*) HTTP/1.1', all)
+					match = re.search(CONNECT_RE, all)
 					if match:
 						host = match.group(1)
 						port = long(match.group(2))
@@ -155,7 +162,7 @@ class ConnectWorker(Worker):
 						self.forwardingQueue.put( Connection(clientSocket, clientAddress, serverSocket, (host,port)).reduce())
 						break
 
-					match = self.__HOST_RE.search(all)
+					match = HOST_RE.search(all)
 					if match:
 						# Not a CONNECT request
 						host = match.group(1)
@@ -172,8 +179,8 @@ class ConnectWorker(Worker):
 							clientSocket.close()
 							break
 
-						print("Forwarding queue size: %d" % self.forwardingQueue.qsize())
-						self.forwardingQueue.put( Connection(clientSocket, clientAddress, serverSocket, (host,port)).reduce() )
+						print("Proxying queue size: %d" % self.proxyingQueue.qsize())
+						self.proxyingQueue.put( Connection(clientSocket, clientAddress, serverSocket, (host,port)).reduce())
 						break
 				else:
 					clientSocket.shutdown(socket.SHUT_RDWR)
@@ -184,31 +191,48 @@ class ConnectWorker(Worker):
 		print("%s quitting..." % self)
 
 
-class ForwardingWorker(Worker):
-	"""
-	Forwards packets between multiple socket pairs (client & server).
-	"""
+class ConnectionWorker(Worker):
 
-	sockets = [] #holds client, server sockets for select()
+	_name = "Connection worker"
 
-	def __init__(self, name, forwardingQueue):
-		Worker.__init__(self, "Forward worker "+ name)
-		self.forwardingQueue = forwardingQueue
+	sockets = [] # holds client, server sockets for select()
+	socket2socket = {} # maps sockets to other sockets
+	socket2conn = {} # maps sockets to their connection
+
+	def __init__(self, name, newConnectionsQueue):
+		Worker.__init__(self, name)
+		self.__newConnectionsQueue = newConnectionsQueue
 		self.sockets = []
 		self.socket2socket = {}
 		self.socket2conn = {}
 
-	def __addConnection(self, conn):
+	def _getNewConnection(self, block=False):
+		if block:
+			connection = self.__newConnectionsQueue.get()
+		else:
+			try:
+				connection = self.__newConnectionsQueue.get_nowait()
+			except Empty:
+				return
+		connection.rebuild()
+		self.__newConnectionsQueue.task_done()
+		self._addConnection(connection)
+
+	def _addConnection(self, conn):
 		clientSocket = conn.clientSocket
 		serverSocket = conn.serverSocket
-		print("Adding client & server pair %s, %s" % (clientSocket, serverSocket))
+		print("Adding connection %s" % conn)
 		self.sockets.extend([clientSocket, serverSocket])
 		self.socket2socket[serverSocket] = clientSocket
 		self.socket2socket[clientSocket] = serverSocket
 		self.socket2conn[serverSocket] = conn
 		self.socket2conn[clientSocket] = conn
 
-	def __removePair(self, oneEnd):
+	def _closeConnection(self, conn):
+		self._removePair(conn.clientSocket)
+		conn.close()
+
+	def _removePair(self, oneEnd):
 		print("Removing socket %s" % oneEnd)
 		otherEnd = self.socket2socket[oneEnd]
 		self.sockets.remove(oneEnd)
@@ -218,30 +242,22 @@ class ForwardingWorker(Worker):
 		self.socket2conn.pop(oneEnd)
 		self.socket2conn.pop(otherEnd)
 
-	def __closeConnection(self, conn):
-		self.__removePair(conn.clientSocket)
-		conn.close()
 
+class TunnelWorker(ConnectionWorker):
+	"""
+	Forwards packets between multiple socket pairs (client & server).
+	"""
 
-	def __getNewConnection(self, block=False):
-		if block:
-			connection = self.forwardingQueue.get()
-		else:
-			try:
-				connection = self.forwardingQueue.get_nowait()
-			except Empty:
-				return
-		connection.rebuild()
-		self.forwardingQueue.task_done()
-		self.__addConnection(connection)
+	_name = "Tunnel worker"
 
-
+	def __init__(self, name, newConnectionsQueue):
+		ConnectionWorker.__init__(self, name, newConnectionsQueue)
 
 	def work(self):
 		self.running = True
 		print("%s started working..." % self)
 
-		self.__getNewConnection(block=True)
+		self._getNewConnection(block=True)
 
 		sockets = self.sockets
 		while self.running:
@@ -260,19 +276,89 @@ class ForwardingWorker(Worker):
 						buf = readable.recv(1024)
 					except Exception, why:
 						sys.stderr.write("Encountered while recv: %s\n" % str(why))
-						self.__closeConnection(conn)
+						self._closeConnection(conn)
 						break
 					if buf:
 						endpoint.sendall(buf)
 					else:
-						self.__closeConnection(conn)
+						self._closeConnection(conn)
 				else:
 					sys.stderr.write("-1 fd on %s, closing\n" % readable)
-					self.__closeConnection(conn)
+					self._closeConnection(conn)
 
-			self.__getNewConnection()
+			self._getNewConnection()
 		# TODO: need to close all connections on exit
 		print("%s quitting...")
+
+
+def getAddressFromBuffer(buf):
+	match = HOST_RE.search(buf)
+	if match:
+		host = match.group(1)
+		port = 80
+		return host,port
+	else:
+		return None, None
+
+
+class ProxyWorker(ConnectionWorker):
+	"""
+	Handles proxying GET/POST requests for multiple connections.
+	"""
+
+	_name = "Proxy worker"
+
+	def __init__(self, name, newConnectionsQueue):
+		ConnectionWorker.__init__(self, name, newConnectionsQueue)
+
+	def work(self):
+		self.running = True
+		print("%s started working..." % self)
+
+		self._getNewConnection(block=True)
+
+		sockets = self.sockets
+		while self.running:
+			readables, writables, exceptions = select.select(sockets, [], sockets, 0.05)
+
+			for exception in exceptions:
+				sys.stderr.write("Encountered: %s\n" + str(exception))
+
+			for readable in readables:
+				if not self.socket2socket.has_key(readable):
+					continue
+				endpoint = self.socket2socket[readable]
+				conn = self.socket2conn[readable]
+				if readable.fileno() != -1:
+					try:
+						buf = readable.recv(1024)
+					except Exception, why:
+						sys.stderr.write("Encountered while recv: %s\n" % str(why))
+						self._closeConnection(conn)
+						continue
+					if buf:
+						self._processBuffer(readable, buf)
+					else:
+						self._closeConnection(conn)
+				else:
+					sys.stderr.write("-1 fd on %s, closing\n" % readable)
+					self._closeConnection(conn)
+
+			self._getNewConnection()
+		# TODO: need to close all connections on exit
+		print("%s quitting...")
+
+	def _processBuffer(self, readable, buf):
+		conn = self.socket2conn[readable]
+		if conn.clientSocket is readable:
+			host, port = getAddressFromBuffer(buf)
+			if host is not None:
+				if (host,port) != conn.serverAddress:
+					print("New connection requested to %s:%s from %s" % (host,port,conn))
+					return
+			conn.serverSocket.sendall(buf)
+		else:
+			conn.clientSocket.sendall(buf)
 
 
 def main():
@@ -283,12 +369,13 @@ def main():
 
 	connectRequestsQueue = JoinableQueue(20)
 	forwardingQueue = JoinableQueue(20)
+	proxyingQueue = JoinableQueue(40)
 
 	processes = []
 	print("Starting workers...")
-	workers = [ ConnectWorker("Adam", connectRequestsQueue, forwardingQueue),
-				ForwardingWorker("Fred", forwardingQueue),
-				#ForwardingWorker("Barney", forwardingQueue)
+	workers = [ SwitchWorker("Adam", connectRequestsQueue, forwardingQueue, proxyingQueue),
+				TunnelWorker("Fred", forwardingQueue),
+				ProxyWorker("Persepolis", proxyingQueue),
 			  ]
 	for worker in workers:
 		p = Process(target=worker.work, args=())
@@ -311,7 +398,7 @@ def main():
 		listeningSocket.close()
 
 	#wait for all of the child processes
-	# TODO: should stop the processes if not quitting not user requested
+	# TODO: should stop the processes if quitting not user requested
 	print("Waiting for child processes...")
 	for p in processes:
 		p.join()
