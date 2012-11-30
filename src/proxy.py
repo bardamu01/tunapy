@@ -11,10 +11,10 @@ Architecture:
 
 """
 
-#TODO: GET mode is not OK, it has to handle every get request itself and not via a tunneled connection to the server
-
 LISTEN_ADDRESS = '127.0.0.1'
 LISTEN_PORT = 8888
+
+BUFFER_SIZE = 2836
 
 import select
 import sys
@@ -26,13 +26,39 @@ from Queue import Empty
 from multiprocessing.reduction import reduce_handle, rebuild_handle
 from multiprocessing import Process, JoinableQueue
 
-running = True
-def signalHandler(signum, frame):
-	global running
-	print("Received %d signal" % signum)
-	if signum == signal.SIGTERM:
-		running = False
-		print("Quiting")
+
+
+def getAddressFromBuffer(buf):
+	"""
+	Returns the host,port found in a buffer.
+	"""
+	match = HOST_RE.search(buf)
+	if match:
+		host = match.group(1)
+		port = 80
+		return host,port
+	else:
+		return None, None
+
+
+class Socket(socket.SocketType):
+	"""
+	A socket with tx/rx statistics.
+	"""
+	tx = 0
+	rx = 0
+
+	def __init__(self, *args, **kwargs):
+		socket.SocketType.__init__(self, *args, **kwargs)
+
+	def recv(self, *args, **kwargs):
+		buf = socket.SocketType.recv(self,*args, **kwargs)
+		if buf:
+			self.rx+=len(buf)
+
+	def sendall(self, data, **kwargs):
+		self.tx+=len(data)
+		return socket.SocketType.sendall(self, data, **kwargs)
 
 
 class Connection(object):
@@ -40,12 +66,10 @@ class Connection(object):
 	clientSocket = None
 	clientHandle = None
 	clientAddress = None
-	clientStats = 0
 
 	serverSocket = None
 	serverHandle = None
 	serverAddress = None
-	serverStats = 0
 
 	def __init__(self, clientSocket, clientAddress, serverSocket, serverAddress):
 		self.clientSocket = clientSocket
@@ -54,7 +78,7 @@ class Connection(object):
 		self.serverAddress = serverAddress
 
 	def __str__(self):
-		return "Connection: %s -> %s " % (self.clientAddress, self.serverAddress)
+		return "%s -> %s " % (self.clientAddress, self.serverAddress)
 
 	def reduce(self):
 		""" Prepares for serialization """
@@ -70,10 +94,14 @@ class Connection(object):
 		return self
 
 	def close(self):
-		print("Closing sockets: %s & %s" % (self.clientSocket, self.serverSocket))
-		self.clientSocket.close()
-		self.serverSocket.shutdown(socket.SHUT_RDWR)
-		self.serverSocket.close()
+		#print("Closing sockets: %s & %s" % (self.clientSocket, self.serverSocket))
+		try:
+			self.clientSocket.shutdown(socket.SHUT_RDWR)
+			self.clientSocket.close()
+			self.serverSocket.shutdown(socket.SHUT_RDWR)
+			self.serverSocket.close()
+		except socket.error, why:
+			sys.stderr.write("Connection % closed: %s" % (self, str(why)))
 
 
 class Worker(object):
@@ -124,7 +152,8 @@ class SwitchWorker(Worker):
 		self.forwardingQueue = forwardingQueue
 		self.proxyingQueue = proxyingQueue
 
-	def connectTo(self, host, port):
+	@staticmethod
+	def connectTo(host, port):
 		serverSocket = socket.socket(socket.AF_INET, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
 		serverSocket.connect((host, port))
 		return serverSocket
@@ -150,8 +179,8 @@ class SwitchWorker(Worker):
 						print("Tunneling to: %s:%s" % (host, port))
 
 						try:
-							serverSocket = self.connectTo(host, port)
-						except Exception, why:
+							serverSocket = SwitchWorker.connectTo(host, port)
+						except socket.error, why:
 							sys.stderr.write(str(why) + "\n")
 							clientSocket.sendall(self.HTTP_CONNECTION_FAILED)
 							clientSocket.shutdown(socket.SHUT_RDWR)
@@ -169,10 +198,10 @@ class SwitchWorker(Worker):
 						port = 80
 						print('Proxying to %s:%d' % (host, port))
 						try:
-							serverSocket = self.connectTo(host, port)
+							serverSocket = SwitchWorker.connectTo(host, port)
 							# resend the client HTTP request to the server
 							serverSocket.sendall(all)
-						except Exception, why:
+						except socket.error, why:
 							sys.stderr.write('An error occurred:\n%s\n' % str(why))
 							clientSocket.sendall(self.HTTP_CONNECTION_FAILED)
 							clientSocket.shutdown(socket.SHUT_RDWR)
@@ -199,6 +228,8 @@ class ConnectionWorker(Worker):
 	socket2socket = {} # maps sockets to other sockets
 	socket2conn = {} # maps sockets to their connection
 
+	SELECT_TIMEOUT = 0.05
+
 	def __init__(self, name, newConnectionsQueue):
 		Worker.__init__(self, name)
 		self.__newConnectionsQueue = newConnectionsQueue
@@ -219,28 +250,68 @@ class ConnectionWorker(Worker):
 		self._addConnection(connection)
 
 	def _addConnection(self, conn):
+		print("%s adding connection %s" % (self, conn))
 		clientSocket = conn.clientSocket
 		serverSocket = conn.serverSocket
-		print("Adding connection %s" % conn)
 		self.sockets.extend([clientSocket, serverSocket])
 		self.socket2socket[serverSocket] = clientSocket
 		self.socket2socket[clientSocket] = serverSocket
 		self.socket2conn[serverSocket] = conn
 		self.socket2conn[clientSocket] = conn
 
-	def _closeConnection(self, conn):
-		self._removePair(conn.clientSocket)
+	def _removeConnection(self, conn):
+		self._removeSocket(conn.clientSocket)
+		self._removeSocket(conn.serverSocket)
+
+	def _closeConnection(self, conn, reason=""):
+		print("%s closing connection %s because %s" % (self, conn, reason))
+		self._removeConnection(conn)
 		conn.close()
 
-	def _removePair(self, oneEnd):
-		print("Removing socket %s" % oneEnd)
-		otherEnd = self.socket2socket[oneEnd]
+	def _removeSocket(self, oneEnd):
 		self.sockets.remove(oneEnd)
-		self.sockets.remove(otherEnd)
 		self.socket2socket.pop(oneEnd)
-		self.socket2socket.pop(otherEnd)
 		self.socket2conn.pop(oneEnd)
-		self.socket2conn.pop(otherEnd)
+
+	def _processBuffer(self, readable, buf):
+		raise  NotImplementedError()
+
+	def work(self):
+		self.running = True
+		print("%s started working..." % self)
+
+		self._getNewConnection(block=True)
+
+		sockets = self.sockets
+		while self.running:
+			readables, writables, exceptions = select.select(sockets, [], sockets, self.SELECT_TIMEOUT)
+
+			for exception in exceptions:
+				sys.stderr.write("Encountered: %s\n" + str(exception))
+
+			for readable in readables:
+				if not self.socket2socket.has_key(readable):
+					continue
+				endpoint = self.socket2socket[readable]
+				conn = self.socket2conn[readable]
+				if readable.fileno() != -1:
+					try:
+						buf = readable.recv(BUFFER_SIZE)
+					except socket.error, why:
+						sys.stderr.write("Encountered while recv: %s\n" % str(why))
+						self._closeConnection(conn, str(why))
+						continue
+					if buf:
+						self._processBuffer(readable, buf)
+					else:
+						self._closeConnection(conn, "buffer is empty")
+				else:
+					sys.stderr.write("-1 fd on %s, closing\n" % readable)
+					self._closeConnection(conn, "socket fd is -1")
+
+			self._getNewConnection()
+		# TODO: need to close all connections on exit
+		print("%s quitting...")
 
 
 class TunnelWorker(ConnectionWorker):
@@ -253,57 +324,21 @@ class TunnelWorker(ConnectionWorker):
 	def __init__(self, name, newConnectionsQueue):
 		ConnectionWorker.__init__(self, name, newConnectionsQueue)
 
-	def work(self):
-		self.running = True
-		print("%s started working..." % self)
-
-		self._getNewConnection(block=True)
-
-		sockets = self.sockets
-		while self.running:
-			readables, writables, exceptions = select.select(sockets, [], sockets, 0.05)
-
-			for exception in exceptions:
-				sys.stderr.write("Encountered: %s\n" + str(exception))
-
-			for readable in readables:
-				if not self.socket2socket.has_key(readable):
-					continue
-				endpoint = self.socket2socket[readable]
-				conn = self.socket2conn[readable]
-				if readable.fileno() != -1:
-					try:
-						buf = readable.recv(1024)
-					except Exception, why:
-						sys.stderr.write("Encountered while recv: %s\n" % str(why))
-						self._closeConnection(conn)
-						break
-					if buf:
-						endpoint.sendall(buf)
-					else:
-						self._closeConnection(conn)
-				else:
-					sys.stderr.write("-1 fd on %s, closing\n" % readable)
-					self._closeConnection(conn)
-
-			self._getNewConnection()
-		# TODO: need to close all connections on exit
-		print("%s quitting...")
-
-
-def getAddressFromBuffer(buf):
-	match = HOST_RE.search(buf)
-	if match:
-		host = match.group(1)
-		port = 80
-		return host,port
-	else:
-		return None, None
+	def _processBuffer(self, readable, buf):
+		return self.socket2socket[readable].sendall(buf)
 
 
 class ProxyWorker(ConnectionWorker):
 	"""
-	Handles proxying GET/POST requests for multiple connections.
+	Handles proxying HTTP 1.1 requests for multiple connections.
+
+	HTTP 1.1 rfc
+
+    pg.13: In HTTP/1.0, most implementations used a new connection for each
+    request/response exchange. In HTTP/1.1, a connection may be used for
+    one or more request/response exchanges, although connections may be
+    closed for a variety of reasons (see section 8.1).
+
 	"""
 
 	_name = "Proxy worker"
@@ -311,82 +346,62 @@ class ProxyWorker(ConnectionWorker):
 	def __init__(self, name, newConnectionsQueue):
 		ConnectionWorker.__init__(self, name, newConnectionsQueue)
 
-	def work(self):
-		self.running = True
-		print("%s started working..." % self)
-
-		self._getNewConnection(block=True)
-
-		sockets = self.sockets
-		while self.running:
-			readables, writables, exceptions = select.select(sockets, [], sockets, 0.05)
-
-			for exception in exceptions:
-				sys.stderr.write("Encountered: %s\n" + str(exception))
-
-			for readable in readables:
-				if not self.socket2socket.has_key(readable):
-					continue
-				endpoint = self.socket2socket[readable]
-				conn = self.socket2conn[readable]
-				if readable.fileno() != -1:
-					try:
-						buf = readable.recv(1024)
-					except Exception, why:
-						sys.stderr.write("Encountered while recv: %s\n" % str(why))
-						self._closeConnection(conn)
-						continue
-					if buf:
-						self._processBuffer(readable, buf)
-					else:
-						self._closeConnection(conn)
-				else:
-					sys.stderr.write("-1 fd on %s, closing\n" % readable)
-					self._closeConnection(conn)
-
-			self._getNewConnection()
-		# TODO: need to close all connections on exit
-		print("%s quitting...")
-
 	def _processBuffer(self, readable, buf):
 		conn = self.socket2conn[readable]
 		if conn.clientSocket is readable:
 			host, port = getAddressFromBuffer(buf)
 			if host is not None:
 				if (host,port) != conn.serverAddress:
+					# observed behaviour was that a client may try to reuse a connection but with a different server
+					# when this is the case the old server connection is replaced with the new one
 					print("New connection requested to %s:%s from %s" % (host,port,conn))
-					return
+					self._removeConnection(conn)
+					conn.serverSocket.shutdown(socket.SHUT_RDWR)
+					conn.serverSocket.close()
+					try:
+						conn.serverSocket = SwitchWorker.connectTo(host,port)
+					except socket.error, why:
+						sys.stderr.write("Failed to setup connection to %s:%s, reason: %s" % (host,port,why) )
+					conn.serverAddress = host,port
+					self._addConnection(conn)
 			conn.serverSocket.sendall(buf)
 		else:
 			conn.clientSocket.sendall(buf)
 
 
+running = True
+def signalHandler(signum, frame):
+	global running
+	print("Received %d signal" % signum)
+	if signum == signal.SIGTERM:
+		running = False
+		print("Quiting")
+
+
 def main():
-	"""
-	Main entry point.
-	"""
 	signal.signal(signal.SIGTERM, signalHandler)
 
 	connectRequestsQueue = JoinableQueue(20)
 	forwardingQueue = JoinableQueue(20)
-	proxyingQueue = JoinableQueue(40)
+	proxyingQueue = JoinableQueue(20)
 
 	processes = []
 	print("Starting workers...")
 	workers = [ SwitchWorker("Adam", connectRequestsQueue, forwardingQueue, proxyingQueue),
-				TunnelWorker("Fred", forwardingQueue),
-				ProxyWorker("Persepolis", proxyingQueue),
-			  ]
+				TunnelWorker("Ted", forwardingQueue),
+				ProxyWorker("Perseus", proxyingQueue),
+				ProxyWorker("Penelope", proxyingQueue),
+			]
 	for worker in workers:
 		p = Process(target=worker.work, args=())
 		processes.append(p)
 		p.start()
 
-	listeningSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
+	listeningSocket = Socket(socket.AF_INET, socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
 	listeningSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
 	listeningSocket.bind((LISTEN_ADDRESS, LISTEN_PORT))
-	listeningSocket.listen(1)
+	listeningSocket.listen(10)
 
 	try:
 		while running:
