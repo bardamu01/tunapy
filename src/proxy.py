@@ -101,7 +101,7 @@ class Connection(object):
 			self.serverSocket.shutdown(socket.SHUT_RDWR)
 			self.serverSocket.close()
 		except socket.error, why:
-			sys.stderr.write("Connection % closed: %s" % (self, str(why)))
+			sys.stderr.write("Connection %s closed: %s" % (self, str(why)))
 
 
 class Worker(object):
