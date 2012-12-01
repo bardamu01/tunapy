@@ -10,6 +10,7 @@ Architecture:
 * several workers forward the packets. One worker can serve multiple connections.
 
 """
+from optparse import OptionParser
 import sys
 import socket
 import signal
@@ -32,7 +33,20 @@ def signalHandler(signum, frame):
 		print("Quiting")
 
 
+class ProxyOptions(OptionParser):
+	def __init__(self):
+		OptionParser.__init__(self)
+		self.add_option("-p", "--port",  type=int,
+						help="port to listen on, default %s" % LISTEN_PORT)
+		self.add_option("-l", "--listen", metavar="ADDRESS",
+						help="address to listen on, default %s" % LISTEN_ADDRESS)
+
+
 def main():
+	options, remainingArgs = ProxyOptions().parse_args()
+	listenAddress = options.listen or LISTEN_ADDRESS
+	listenPort = options.port or LISTEN_PORT
+
 	signal.signal(signal.SIGTERM, signalHandler)
 
 	connectRequestsQueue = JoinableQueue(20)
@@ -54,8 +68,9 @@ def main():
 	listeningSocket = Socket(socket.AF_INET, socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
 	listeningSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-	listeningSocket.bind((LISTEN_ADDRESS, LISTEN_PORT))
+	listeningSocket.bind((listenAddress, listenPort))
 	listeningSocket.listen(10)
+	print("Listening on %s:%d" % (listenAddress, listenPort))
 
 	try:
 		while running:
