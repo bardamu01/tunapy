@@ -58,7 +58,7 @@ def main():
 	workers = [ SwitchWorker("Adam", connectRequestsQueue, forwardingQueue, proxyingQueue),
 				TunnelWorker("Ted", forwardingQueue),
 				ProxyWorker("Perseus", proxyingQueue),
-				ProxyWorker("Penelope", proxyingQueue),
+				#ProxyWorker("Penelope", proxyingQueue),
 			]
 	for worker in workers:
 		p = Process(target=worker.work, args=())

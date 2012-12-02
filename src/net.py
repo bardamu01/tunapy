@@ -1,7 +1,8 @@
-from multiprocessing.reduction import rebuild_handle, reduce_handle
+import re
 import socket
 import sys
-import re
+
+from multiprocessing.reduction import reduce_socket
 
 HOST_RE = re.compile('Host: ([^ :\r\n]*)(:[0-9]{1,5})?')
 CONNECT_RE = re.compile('CONNECT ([^ ]*):([1-9]{1,5}) HTTP/1.1')
@@ -47,14 +48,15 @@ class Endpoint(object):
 
 	socket = None
 	address = None
-	handle = None
 
 	def __init__(self, realsocket, address):
 		self.socket = realsocket
+		# might be redundant because of realsocket.getpeername()
+		# but at least we see host names not IPs
 		self.address = address
 
 	def __str__(self):
-		return str(self.address)
+		return "%s:%s [%d]" % (self.address[0], self.address[1], self.socket.fileno())
 
 	def shutdown(self, msgToSend=None):
 		try:
@@ -63,16 +65,16 @@ class Endpoint(object):
 			self.socket.shutdown(socket.SHUT_RDWR)
 		except socket.error, why:
 			sys.stderr.write("Failure while shutting down %s: %s" % (self, why.message))
-		self.socket.close()
+		finally:
+			self.socket.close()
 
 	def rebuild(self):
-		self.socket = socket.fromfd(rebuild_handle(self.handle), socket.AF_INET, socket.SOCK_STREAM)
-		self.handle = None
+		meth, args = self.socket
+		self.socket = meth(*args)
 		return self
 
 	def reduce(self):
-		self.handle = reduce_handle(self.socket.fileno())
-		self.socket = None
+		self.socket = reduce_socket(self.socket)
 		return self
 
 	@staticmethod

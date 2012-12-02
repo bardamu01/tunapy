@@ -1,9 +1,10 @@
+import os
 import sys
 import socket
 import select
 from Queue import Empty
 
-from net import getAddressFromBuffer, Endpoint, CONNECT_RE, Connection, HOST_RE
+from net import getAddressFromBuffer, Endpoint, Connection, HOST_RE, CONNECT_RE
 
 BUFFER_SIZE = 2836
 
@@ -16,13 +17,21 @@ class Worker(object):
 	running = False
 
 	def __init__(self, name):
-		self.name = self._name + " " + name
+		self.name = "%s %s" % (self._name, name)
 
 	def __str__(self):
-		return self.name
+		return self.name + " (%d)" % os.getpid()
 
 	def work(self):
-		raise NotImplementedError()
+		self.say("Started working")
+		self.running = True
+
+	def say(self, message):
+		print("%s said: %s" % (self, message))
+
+	def quit(self):
+		# TODO: need to close all connections on exit
+		self.say("Quitting...")
 
 
 class SwitchWorker(Worker):
@@ -56,24 +65,23 @@ class SwitchWorker(Worker):
 
 
 	def work(self):
-		self.running = True
-		print("%s started working..." % self)
+		Worker.work(self)
 
 		while self.running:
 			client = self.connectRequestsQueue.get()
 			client.rebuild()
-			print("Working with: ", client.address)
+			self.say("New client: %s " % client)
 			all = ""
 			while self.running:
 				buf = client.socket.recv(BUFFER_SIZE)
 				if buf:
-					print("Received %s" % buf)
+					self.say("Received %s" % buf)
 					all+=buf
 					match = CONNECT_RE.search(all)
 					if match:
 						host = match.group(1)
 						port = long(match.group(2))
-						print("Tunneling to: %s:%s" % (host, port))
+						self.say("Tunneling to: %s:%s" % (host, port))
 
 						try:
 							server = Endpoint.connectTo(host, port)
@@ -90,12 +98,11 @@ class SwitchWorker(Worker):
 					match = HOST_RE.search(all)
 					if match:
 						host = match.group(1)
-						print match.groups()
 						if len(match.groups()) > 1 and match.group(2):
 							port = int(match.group(2)[1:])
 						else:
 							port = 80
-						print('Proxying to %s:%d' % (host, port))
+						self.say('Proxying to %s:%d' % (host, port))
 						try:
 							server = Endpoint.connectTo(host, port)
 							# resend the client HTTP request to the server
@@ -105,7 +112,7 @@ class SwitchWorker(Worker):
 							client.shutdown()
 							break
 
-						print("Proxying queue size: %d" % self.proxyingQueue.qsize())
+						self.say("Proxying queue size: %d" % self.proxyingQueue.qsize())
 						self.proxyingQueue.put( Connection(client, server).reduce())
 						break
 				else:
@@ -113,7 +120,7 @@ class SwitchWorker(Worker):
 					break
 
 		self.forwardingQueue.join()
-		print("%s quitting..." % self)
+		self.quit()
 
 
 class ConnectionWorker(Worker):
@@ -146,7 +153,7 @@ class ConnectionWorker(Worker):
 		self._addConnection(connection)
 
 	def _addConnection(self, conn):
-		print("%s adding connection %s" % (self, conn))
+		self.say("Adding connection %s" % conn)
 		clientSocket = conn.client.socket
 		serverSocket = conn.server.socket
 		self.sockets.extend([clientSocket, serverSocket])
@@ -160,7 +167,7 @@ class ConnectionWorker(Worker):
 		self._removeSocket(conn.server.socket)
 
 	def _closeConnection(self, conn, reason=""):
-		print("%s closing connection %s because %s" % (self, conn, reason))
+		self.say("Closing connection %s because %s" % (conn, reason))
 		self._removeConnection(conn)
 		conn.close()
 
@@ -173,8 +180,7 @@ class ConnectionWorker(Worker):
 		raise  NotImplementedError()
 
 	def work(self):
-		self.running = True
-		print("%s started working..." % self)
+		Worker.work(self)
 
 		self._getNewConnection(block=True)
 
@@ -205,8 +211,7 @@ class ConnectionWorker(Worker):
 					self._closeConnection(conn, "socket fd is -1")
 
 			self._getNewConnection()
-		# TODO: need to close all connections on exit
-		print("%s quitting...")
+		self.quit()
 
 
 class TunnelWorker(ConnectionWorker):
@@ -248,7 +253,7 @@ class ProxyWorker(ConnectionWorker):
 			if host is not None and (host, port) != conn.server.address:
 			# observed behaviour was that a client may try to reuse a connection but with a different server
 			# when this is the case the old server connection is replaced with the new one
-				print("New connection requested to %s:%s from %s" % (host,port,conn))
+				self.say("New connection requested to %s:%s from %s" % (host,port,conn))
 				self._removeConnection(conn)
 				conn.server.shutdown()
 				try:
@@ -262,5 +267,5 @@ class ProxyWorker(ConnectionWorker):
 			try:
 				conn.client.socket.sendall(buf)
 			except socket.error, why:
-				print("Could not send buffer on %s because %s" % (conn, why))
+				self.say("Could not send buffer on %s because %s" % (conn, why))
 				self._closeConnection(conn)
