@@ -3,8 +3,9 @@ import sys
 import socket
 import select
 from Queue import Empty
+from httputil import HttpRequest
 
-from net import getAddressFromBuffer, Endpoint, Connection, HOST_RE, CONNECT_RE
+from net import Endpoint, Connection
 from status import Status
 
 BUFFER_SIZE = 2836
@@ -84,14 +85,13 @@ class SwitchWorker(Worker):
 				if buf:
 					self.say("Received %s" % buf)
 					all+=buf
-					match = CONNECT_RE.search(all)
-					if match:
-						host = match.group(1)
-						port = long(match.group(2))
+					httpRequest = HttpRequest.buildFromBuffer(buf)
+					print("Req:" + httpRequest.requestType)
+					if httpRequest.requestType == "CONNECT":
+						host, port = httpRequest.requestedResource.split(":")
 						self.say("Tunneling to: %s:%s" % (host, port))
-
 						try:
-							server = Endpoint.connectTo(host, port)
+							server = Endpoint.connectTo(host, long(port))
 						except socket.error, why:
 							sys.stderr.write(why.message + "\n")
 							client.shutdown()
@@ -100,20 +100,16 @@ class SwitchWorker(Worker):
 						client.socket.sendall("HTTP/1.1 200 Connection established\r\nProxy-Agent: TunaPy/0.1\r\n\r\n")
 						self.forwardingQueue.put( Connection(client, server).reduce())
 						break
-
-					# non CONNECT requests
-					match = HOST_RE.search(all)
-					if match:
-						host = match.group(1)
-						if len(match.groups()) > 1 and match.group(2):
-							port = int(match.group(2)[1:])
-						else:
-							port = 80
+					else:
+						httpRequest.makeRelative()
+						host = httpRequest.options['Host']
+						port = 80
 						self.say('Proxying to %s:%d' % (host, port))
 						try:
 							server = Endpoint.connectTo(host, port)
 							# resend the client HTTP request to the server
-							server.socket.sendall(all)
+							self.say("Sending: %s" % httpRequest.toBuffer())
+							server.socket.sendall(httpRequest.toBuffer())
 						except socket.error, why:
 							sys.stderr.write('An error occurred:\n%s\n' % why.message)
 							client.shutdown()
@@ -256,7 +252,9 @@ class ProxyWorker(ConnectionWorker):
 	def _processBuffer(self, readable, buf):
 		conn = self.socket2conn[readable]
 		if conn.client.socket is readable:
-			host, port = getAddressFromBuffer(buf)
+			httpRequest= HttpRequest.buildFromBuffer(buf)
+			host = httpRequest.options['Host']
+			port=80
 			if host is not None and (host, port) != conn.server.address:
 			# observed behaviour was that a client may try to reuse a connection but with a different server
 			# when this is the case the old server connection is replaced with the new one

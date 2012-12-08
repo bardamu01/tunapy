@@ -8,19 +8,6 @@ HOST_RE = re.compile('Host: ([^ :\r\n]*)(:[0-9]{1,5})?')
 CONNECT_RE = re.compile('CONNECT ([^ ]*):([1-9]{1,5}) HTTP/1.1')
 
 
-def getAddressFromBuffer(buf):
-	"""
-	Returns the host,port found in a buffer.
-	"""
-	if buf.find("Host:") > 0:
-		match = HOST_RE.search(buf)
-		if match:
-			host = match.group(1)
-			port = 80
-			return host,port
-	return None, None
-
-
 class Socket(socket.SocketType):
 	"""
 	A socket with tx/rx statistics.
