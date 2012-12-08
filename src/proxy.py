@@ -18,6 +18,7 @@ import signal
 from multiprocessing import Process, JoinableQueue
 
 from net import Socket, Endpoint
+from monitor import MonitorWorker
 from workers import SwitchWorker, TunnelWorker, ProxyWorker
 
 LISTEN_ADDRESS = '127.0.0.1'
@@ -52,13 +53,17 @@ def main():
 	connectRequestsQueue = JoinableQueue(20)
 	forwardingQueue = JoinableQueue(20)
 	proxyingQueue = JoinableQueue(20)
+	statusQueue = JoinableQueue(20)
 
 	processes = []
 	print("Starting workers...")
-	workers = [ SwitchWorker("Adam", connectRequestsQueue, forwardingQueue, proxyingQueue),
-				TunnelWorker("Ted", forwardingQueue),
-				ProxyWorker("Perseus", proxyingQueue),
-				#ProxyWorker("Penelope", proxyingQueue),
+	workers = [ SwitchWorker("Adam", connectRequestsQueue, forwardingQueue, proxyingQueue, statusQueue),
+				TunnelWorker("Ted", forwardingQueue, statusQueue),
+				ProxyWorker("Perseus", proxyingQueue, statusQueue),
+				#ProxyWorker("Penelope1", proxyingQueue,statusQueue),
+				#ProxyWorker("Penelope2", proxyingQueue, statusQueue),
+				#ProxyWorker("Penelope3", proxyingQueue, statusQueue),
+				MonitorWorker("Mo", statusQueue),
 			]
 	for worker in workers:
 		p = Process(target=worker.work, args=())

@@ -5,6 +5,7 @@ import select
 from Queue import Empty
 
 from net import getAddressFromBuffer, Endpoint, Connection, HOST_RE, CONNECT_RE
+from status import Status
 
 BUFFER_SIZE = 2836
 
@@ -15,9 +16,11 @@ class Worker(object):
 	"""
 	_name = "Base worker"
 	running = False
+	statusQueue = None
 
-	def __init__(self, name):
+	def __init__(self, name, statusQueue):
 		self.name = "%s %s" % (self._name, name)
+		self.statusQueue = statusQueue
 
 	def __str__(self):
 		return self.name + " (%d)" % os.getpid()
@@ -27,7 +30,11 @@ class Worker(object):
 		self.running = True
 
 	def say(self, message):
-		print("%s said: %s" % (self, message))
+		statement = "%s said: %s" % (self, message)
+		if self.statusQueue:
+			self.statusQueue.put(Status(self.name, message))
+		else:
+			print(statement)
 
 	def quit(self):
 		# TODO: need to close all connections on exit
@@ -56,8 +63,8 @@ class SwitchWorker(Worker):
 
 	HTTP_CONNECTION_FAILED = "HTTP/1.1 404 Connection failed\r\n\r\n"
 
-	def __init__(self, name, connectRequestsQueue, forwardingQueue, proxyingQueue):
-		Worker.__init__(self, name)
+	def __init__(self, name, connectRequestsQueue, forwardingQueue, proxyingQueue, statusQueue):
+		Worker.__init__(self, name, statusQueue)
 		self.connectRequestsQueue = connectRequestsQueue
 		self.forwardingQueue = forwardingQueue
 		self.proxyingQueue = proxyingQueue
@@ -133,8 +140,8 @@ class ConnectionWorker(Worker):
 
 	SELECT_TIMEOUT = 0.05
 
-	def __init__(self, name, newConnectionsQueue):
-		Worker.__init__(self, name)
+	def __init__(self, name, newConnectionsQueue, statusQueue):
+		Worker.__init__(self, name, statusQueue)
 		self.__newConnectionsQueue = newConnectionsQueue
 		self.sockets = []
 		self.socket2socket = {}
@@ -221,8 +228,8 @@ class TunnelWorker(ConnectionWorker):
 
 	_name = "Tunnel worker"
 
-	def __init__(self, name, newConnectionsQueue):
-		ConnectionWorker.__init__(self, name, newConnectionsQueue)
+	def __init__(self, name, newConnectionsQueue, statusQueue):
+		ConnectionWorker.__init__(self, name, newConnectionsQueue, statusQueue)
 
 	def _processBuffer(self, readable, buf):
 		return self.socket2socket[readable].sendall(buf)
@@ -243,8 +250,8 @@ class ProxyWorker(ConnectionWorker):
 
 	_name = "Proxy worker"
 
-	def __init__(self, name, newConnectionsQueue):
-		ConnectionWorker.__init__(self, name, newConnectionsQueue)
+	def __init__(self, name, newConnectionsQueue, statusQueue):
+		ConnectionWorker.__init__(self, name, newConnectionsQueue, statusQueue)
 
 	def _processBuffer(self, readable, buf):
 		conn = self.socket2conn[readable]
