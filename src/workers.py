@@ -267,7 +267,8 @@ class ProxyWorker(ConnectionWorker):
 					sys.stderr.write("Failed to setup connection to %s:%s, reason: %s" % (host,port,why) )
 					return
 				self._addConnection(conn)
-			conn.server.socket.sendall(buf)
+			httpRequest.makeRelative()
+			conn.server.socket.sendall(httpRequest.toBuffer())
 		else:
 			try:
 				conn.client.socket.sendall(buf)
