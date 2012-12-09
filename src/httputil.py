@@ -1,6 +1,7 @@
 import re
 
-CONNECT_RE = re.compile('CONNECT ([^ ]*):([1-9]{1,5}) HTTP/1.1')
+__CONNECT_RE = re.compile('CONNECT ([^ ]*):([1-9]{1,5}) HTTP/1.1')
+__HOST_RE = re.compile('Host: ([^ :\r\n]*)(:[0-9]{1,5})?')
 
 HTTP_REQUEST_ENDING = "\r\n\r\n"
 

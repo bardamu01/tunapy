@@ -19,7 +19,7 @@ from multiprocessing import Process, JoinableQueue
 
 from net import Socket, Endpoint
 from monitor import MonitorWorker
-from workers import SwitchWorker, TunnelWorker, ProxyWorker
+from workers import SwitchWorker, ForwardingWorker, ProxyWorker
 
 LISTEN_ADDRESS = '127.0.0.1'
 LISTEN_PORT = 8888
@@ -41,12 +41,20 @@ class ProxyOptions(OptionParser):
 						help="port to listen on, default %s" % LISTEN_PORT)
 		self.add_option("-l", "--listen", metavar="ADDRESS",
 						help="address to listen on, default %s" % LISTEN_ADDRESS)
+		self.add_option("-f", "--forward", metavar="HOST:PORT",
+						help="forward to the next proxy server")
 
 
 def main():
 	options, remainingArgs = ProxyOptions().parse_args()
 	listenAddress = options.listen or LISTEN_ADDRESS
 	listenPort = options.port or LISTEN_PORT
+
+	proxy = ()
+	if options.forward:
+		split = options.forward.split(":")
+		proxy = split[0],long(split[1])
+		print("Will forward to: " + options.forward)
 
 	signal.signal(signal.SIGTERM, signalHandler)
 
@@ -58,14 +66,16 @@ def main():
 	processes = []
 	print("Starting workers...")
 	workers = [ SwitchWorker("Adam", connectRequestsQueue, forwardingQueue, proxyingQueue, statusQueue),
-				TunnelWorker("Ted", forwardingQueue, statusQueue),
+				ForwardingWorker("Fred", forwardingQueue, statusQueue),
 				ProxyWorker("Perseus", proxyingQueue, statusQueue),
-				#ProxyWorker("Penelope1", proxyingQueue,statusQueue),
-				#ProxyWorker("Penelope2", proxyingQueue, statusQueue),
-				#ProxyWorker("Penelope3", proxyingQueue, statusQueue),
+				ProxyWorker("Penelope1", proxyingQueue,statusQueue),
+				ProxyWorker("Penelope2", proxyingQueue, statusQueue),
+				ProxyWorker("Penelope3", proxyingQueue, statusQueue),
 				MonitorWorker("Mo", statusQueue),
 			]
 	for worker in workers:
+		if isinstance(worker, SwitchWorker):
+			worker.proxy = proxy
 		p = Process(target=worker.work, args=())
 		processes.append(p)
 		p.start()

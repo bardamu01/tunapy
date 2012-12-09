@@ -61,6 +61,7 @@ class SwitchWorker(Worker):
 	"""
 
 	_name = "Switch worker"
+	proxy = ()
 
 	HTTP_CONNECTION_FAILED = "HTTP/1.1 404 Connection failed\r\n\r\n"
 
@@ -71,53 +72,60 @@ class SwitchWorker(Worker):
 		self.proxyingQueue = proxyingQueue
 
 
-
 	def work(self):
 		Worker.work(self)
-
 		while self.running:
 			client = self.connectRequestsQueue.get()
 			client.rebuild()
 			self.say("New client: %s " % client)
-			all = ""
 			while self.running:
 				buf = client.socket.recv(BUFFER_SIZE)
 				if buf:
 					self.say("Received %s" % buf)
-					all+=buf
-					httpRequest = HttpRequest.buildFromBuffer(buf)
-					print("Req:" + httpRequest.requestType)
-					if httpRequest.requestType == "CONNECT":
-						host, port = httpRequest.requestedResource.split(":")
-						self.say("Tunneling to: %s:%s" % (host, port))
+					if self.proxy:
+						self.say("Forwarding to next proxy: %s" % str(self.proxy))
 						try:
-							server = Endpoint.connectTo(host, long(port))
+							server = Endpoint.connectTo(self.proxy[0], self.proxy[1])
+							server.socket.sendall(buf)
 						except socket.error, why:
 							sys.stderr.write(why.message + "\n")
 							client.shutdown()
 							break
-
-						client.socket.sendall("HTTP/1.1 200 Connection established\r\nProxy-Agent: TunaPy/0.1\r\n\r\n")
 						self.forwardingQueue.put( Connection(client, server).reduce())
 						break
 					else:
-						httpRequest.makeRelative()
-						host = httpRequest.options['Host']
-						port = 80
-						self.say('Proxying to %s:%d' % (host, port))
-						try:
-							server = Endpoint.connectTo(host, port)
-							# resend the client HTTP request to the server
-							self.say("Sending: %s" % httpRequest.toBuffer())
-							server.socket.sendall(httpRequest.toBuffer())
-						except socket.error, why:
-							sys.stderr.write('An error occurred:\n%s\n' % why.message)
-							client.shutdown()
-							break
+						httpRequest = HttpRequest.buildFromBuffer(buf)
+						if httpRequest.requestType == "CONNECT":
+							host, port = httpRequest.requestedResource.split(":")
+							self.say("Tunneling to: %s:%s" % (host, port))
+							try:
+								server = Endpoint.connectTo(host, long(port))
+							except socket.error, why:
+								sys.stderr.write(why.message + "\n")
+								client.shutdown()
+								break
 
-						self.say("Proxying queue size: %d" % self.proxyingQueue.qsize())
-						self.proxyingQueue.put( Connection(client, server).reduce())
-						break
+							client.socket.sendall("HTTP/1.1 200 Connection established\r\nProxy-Agent: TunaPy/0.1\r\n\r\n")
+							self.forwardingQueue.put( Connection(client, server).reduce())
+							break
+						else:
+							httpRequest.makeRelative()
+							host = httpRequest.options['Host']
+							port = 80
+							self.say('Proxying to %s:%d' % (host, port))
+							try:
+								server = Endpoint.connectTo(host, port)
+								# resend the client HTTP request to the server
+								self.say("Sending: %s" % httpRequest.toBuffer())
+								server.socket.sendall(httpRequest.toBuffer())
+							except socket.error, why:
+								sys.stderr.write('An error occurred:\n%s\n' % why.message)
+								client.shutdown()
+								break
+
+							self.say("Proxying queue size: %d" % self.proxyingQueue.qsize())
+							self.proxyingQueue.put( Connection(client, server).reduce())
+							break
 				else:
 					client.shutdown()
 					break
@@ -217,7 +225,7 @@ class ConnectionWorker(Worker):
 		self.quit()
 
 
-class TunnelWorker(ConnectionWorker):
+class ForwardingWorker(ConnectionWorker):
 	"""
 	Forwards packets between multiple socket pairs (client & server).
 	"""
@@ -256,8 +264,8 @@ class ProxyWorker(ConnectionWorker):
 			host = httpRequest.options['Host']
 			port=80
 			if host is not None and (host, port) != conn.server.address:
-			# observed behaviour was that a client may try to reuse a connection but with a different server
-			# when this is the case the old server connection is replaced with the new one
+				# observed behaviour was that a client may try to reuse a connection but with a different server
+				# when this is the case the old server connection is replaced with the new one
 				self.say("New connection requested to %s:%s from %s" % (host,port,conn))
 				self._removeConnection(conn)
 				conn.server.shutdown()
@@ -275,3 +283,4 @@ class ProxyWorker(ConnectionWorker):
 			except socket.error, why:
 				self.say("Could not send buffer on %s because %s" % (conn, why))
 				self._closeConnection(conn)
+

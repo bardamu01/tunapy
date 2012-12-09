@@ -1,11 +1,7 @@
-import re
 import socket
 import sys
 
 from multiprocessing.reduction import reduce_socket
-
-HOST_RE = re.compile('Host: ([^ :\r\n]*)(:[0-9]{1,5})?')
-CONNECT_RE = re.compile('CONNECT ([^ ]*):([1-9]{1,5}) HTTP/1.1')
 
 
 class Socket(socket.SocketType):
