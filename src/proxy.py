@@ -65,17 +65,18 @@ def main():
 
 	processes = []
 	print("Starting workers...")
-	workers = [ SwitchWorker("Adam", connectRequestsQueue, forwardingQueue, proxyingQueue, statusQueue),
-				ForwardingWorker("Fred", forwardingQueue, statusQueue),
-				ProxyWorker("Perseus", proxyingQueue, statusQueue),
-				ProxyWorker("Penelope1", proxyingQueue,statusQueue),
-				ProxyWorker("Penelope2", proxyingQueue, statusQueue),
-				ProxyWorker("Penelope3", proxyingQueue, statusQueue),
-				MonitorWorker("Mo", statusQueue),
+	workers = [ SwitchWorker("Adam", connectRequestsQueue, forwardingQueue, proxyingQueue),
+				ForwardingWorker("Fred", forwardingQueue),
+				ProxyWorker("Perseus", proxyingQueue),
+				ProxyWorker("Penelope1", proxyingQueue),
+				ProxyWorker("Penelope2", proxyingQueue),
+				ProxyWorker("Penelope3", proxyingQueue),
+				MonitorWorker("Mo"),
 			]
 	for worker in workers:
 		if isinstance(worker, SwitchWorker):
 			worker.proxy = proxy
+		worker.statusQueue = statusQueue
 		p = Process(target=worker.work, args=())
 		processes.append(p)
 		p.start()

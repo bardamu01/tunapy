@@ -19,7 +19,7 @@ class Worker(object):
 	running = False
 	statusQueue = None
 
-	def __init__(self, name, statusQueue):
+	def __init__(self, name, statusQueue=None):
 		self.name = "%s %s" % (self._name, name)
 		self.statusQueue = statusQueue
 
@@ -65,7 +65,7 @@ class SwitchWorker(Worker):
 
 	HTTP_CONNECTION_FAILED = "HTTP/1.1 404 Connection failed\r\n\r\n"
 
-	def __init__(self, name, connectRequestsQueue, forwardingQueue, proxyingQueue, statusQueue):
+	def __init__(self, name, connectRequestsQueue, forwardingQueue, proxyingQueue, statusQueue=None):
 		Worker.__init__(self, name, statusQueue)
 		self.connectRequestsQueue = connectRequestsQueue
 		self.forwardingQueue = forwardingQueue
@@ -232,20 +232,23 @@ class ForwardingWorker(ConnectionWorker):
 
 	_name = "Tunnel worker"
 
-	def __init__(self, name, newConnectionsQueue, statusQueue):
+	def __init__(self, name, newConnectionsQueue, statusQueue=None):
 		ConnectionWorker.__init__(self, name, newConnectionsQueue, statusQueue)
 
 	def _processBuffer(self, readable, buf):
-		return self.socket2socket[readable].sendall(buf)
+		try:
+			self.socket2socket[readable].sendall(buf)
+		except socket.error, why:
+			conn = self.socket2conn[readable]
+			self._closeConnection(conn, "Could not send buffer: %s" % why.message)
 
 
 class ProxyWorker(ConnectionWorker):
 	"""
 	Handles proxying HTTP 1.1 requests for multiple connections.
 
-	HTTP 1.1 rfc
-
-    pg.13: In HTTP/1.0, most implementations used a new connection for each
+	HTTP 1.1 rfc, pg.13:
+		In HTTP/1.0, most implementations used a new connection for each
     request/response exchange. In HTTP/1.1, a connection may be used for
     one or more request/response exchanges, although connections may be
     closed for a variety of reasons (see section 8.1).
@@ -254,7 +257,7 @@ class ProxyWorker(ConnectionWorker):
 
 	_name = "Proxy worker"
 
-	def __init__(self, name, newConnectionsQueue, statusQueue):
+	def __init__(self, name, newConnectionsQueue, statusQueue=None):
 		ConnectionWorker.__init__(self, name, newConnectionsQueue, statusQueue)
 
 	def _processBuffer(self, readable, buf):
