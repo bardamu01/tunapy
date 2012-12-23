@@ -42,6 +42,7 @@ class ProxyOptions(OptionParser):
 		self.add_option("-l", "--listen", metavar="ADDRESS",
 						help="address to listen on, default %s" % LISTEN_ADDRESS)
 		self.add_option("-f", "--forward", metavar="HOST:PORT",
+						default=[], action="append",
 						help="forward to the next proxy server")
 
 
@@ -50,11 +51,11 @@ def main():
 	listenAddress = options.listen or LISTEN_ADDRESS
 	listenPort = options.port or LISTEN_PORT
 
-	proxy = ()
-	if options.forward:
-		split = options.forward.split(":")
-		proxy = split[0],long(split[1])
-		print("Will forward to: " + options.forward)
+	proxyList = []
+	for proxy in options.forward:
+		host, port = proxy.split(":")
+		proxyList.append((host,long(port)))
+	print("Will forward to: %s" % options.forward)
 
 	signal.signal(signal.SIGTERM, signalHandler)
 
@@ -75,7 +76,7 @@ def main():
 			]
 	for worker in workers:
 		if isinstance(worker, SwitchWorker):
-			worker.proxy = proxy
+			worker.proxyList = proxyList
 		worker.statusQueue = statusQueue
 		p = Process(target=worker.work, args=())
 		processes.append(p)

@@ -61,7 +61,7 @@ class SwitchWorker(Worker):
 	"""
 
 	_name = "Switch worker"
-	proxy = ()
+	proxyList = []
 
 	HTTP_CONNECTION_FAILED = "HTTP/1.1 404 Connection failed\r\n\r\n"
 
@@ -71,6 +71,22 @@ class SwitchWorker(Worker):
 		self.forwardingQueue = forwardingQueue
 		self.proxyingQueue = proxyingQueue
 
+
+	def __getProxy(self):
+		"""
+		Tries to find a reachable proxy. Makes it first proxy if found.
+		"""
+		for proxy in self.proxyList:
+			try:
+				ret = Endpoint.connectTo(proxy[0], proxy[1])
+				if proxy != self.proxyList[0]:
+					self.say("Making %s first proxy" % str(proxy))
+					self.proxyList.remove(proxy)
+					self.proxyList = [proxy] + self.proxyList
+				return ret
+			except socket.error:
+				self.say("Failed to connect to proxy %s" % str(proxy))
+		return None
 
 	def work(self):
 		Worker.work(self)
@@ -82,16 +98,16 @@ class SwitchWorker(Worker):
 				buf = client.socket.recv(BUFFER_SIZE)
 				if buf:
 					self.say("Received %s" % buf)
-					if self.proxy:
-						self.say("Forwarding to next proxy: %s" % str(self.proxy))
+					if self.proxyList:
+						proxy = self.__getProxy()
+						self.say("Forwarding to next proxy: %s" % str(proxy))
 						try:
-							server = Endpoint.connectTo(self.proxy[0], self.proxy[1])
-							server.socket.sendall(buf)
+							proxy.socket.sendall(buf)
 						except socket.error, why:
 							sys.stderr.write(why.message + "\n")
 							client.shutdown()
 							break
-						self.forwardingQueue.put( Connection(client, server).reduce())
+						self.forwardingQueue.put( Connection(client, proxy).reduce())
 						break
 					else:
 						httpRequest = HttpRequest.buildFromBuffer(buf)
@@ -233,7 +249,7 @@ class ForwardingWorker(ConnectionWorker):
 	_name = "Tunnel worker"
 
 	def __init__(self, name, newConnectionsQueue, statusQueue=None):
-		ConnectionWorker.__init__(self, name, newConnectionsQueue, statusQueue)
+		ConnectionWorker.__init__(self, name, newConnectionsQueue, statusQueue=None)
 
 	def _processBuffer(self, readable, buf):
 		try:
