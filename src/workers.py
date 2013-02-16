@@ -5,7 +5,7 @@ import select
 from Queue import Empty
 from httputil import HttpRequest
 
-from net import Endpoint, Connection
+from net import Endpoint, Connection, Address
 from status import Status
 
 BUFFER_SIZE = 2836
@@ -71,14 +71,13 @@ class SwitchWorker(Worker):
 		self.forwardingQueue = forwardingQueue
 		self.proxyingQueue = proxyingQueue
 
-
 	def __getProxy(self):
 		"""
 		Tries to find a reachable proxy. Makes it first proxy if found.
 		"""
 		for proxy in self.proxyList:
 			try:
-				ret = Endpoint.connectTo(proxy[0], proxy[1])
+				ret = Endpoint.connectTo(proxy)
 				if proxy != self.proxyList[0]:
 					self.say("Making %s first proxy" % str(proxy))
 					self.proxyList.remove(proxy)
@@ -98,8 +97,12 @@ class SwitchWorker(Worker):
 				buf = client.socket.recv(BUFFER_SIZE)
 				if buf:
 					self.say("Received %s" % buf)
-					if self.proxyList:
+					if self.proxyList: # using another proxy
 						proxy = self.__getProxy()
+						if proxy is None:
+							self.say("Could not find a suitable proxy, shutting down connection to %s" % client)
+							client.shutdown()
+							break
 						self.say("Forwarding to next proxy: %s" % str(proxy))
 						try:
 							proxy.socket.sendall(buf)
@@ -109,13 +112,13 @@ class SwitchWorker(Worker):
 							break
 						self.forwardingQueue.put( Connection(client, proxy).reduce())
 						break
-					else:
+					else: # direct connection
 						httpRequest = HttpRequest.buildFromBuffer(buf)
 						if httpRequest.requestType == "CONNECT":
 							host, port = httpRequest.requestedResource.split(":")
 							self.say("Tunneling to: %s:%s" % (host, port))
 							try:
-								server = Endpoint.connectTo(host, long(port))
+								server = Endpoint.connectTo(Address(host, port))
 							except socket.error, why:
 								sys.stderr.write(why.message + "\n")
 								client.shutdown()
@@ -128,9 +131,10 @@ class SwitchWorker(Worker):
 							httpRequest.makeRelative()
 							host = httpRequest.options['Host']
 							port = 80
-							self.say('Proxying to %s:%d' % (host, port))
+							address = Address(host, port)
+							self.say('Proxying to %s:%d' % address)
 							try:
-								server = Endpoint.connectTo(host, port)
+								server = Endpoint.connectTo(address)
 								# resend the client HTTP request to the server
 								self.say("Sending: %s" % httpRequest.toBuffer())
 								server.socket.sendall(httpRequest.toBuffer())
@@ -280,18 +284,18 @@ class ProxyWorker(ConnectionWorker):
 		conn = self.socket2conn[readable]
 		if conn.client.socket is readable:
 			httpRequest= HttpRequest.buildFromBuffer(buf)
-			host = httpRequest.options['Host']
-			port=80
-			if host is not None and (host, port) != conn.server.address:
+			address = Address(httpRequest.options['Host'], 80)
+
+			if address.host is not None and (address.host, address.port) != conn.server.address:
 				# observed behaviour was that a client may try to reuse a connection but with a different server
 				# when this is the case the old server connection is replaced with the new one
-				self.say("New connection requested to %s:%s from %s" % (host,port,conn))
+				self.say("New connection requested to %s from %s" % (address,conn))
 				self._removeConnection(conn)
 				conn.server.shutdown()
 				try:
-					conn.server= Endpoint.connectTo(host,port)
+					conn.server= Endpoint.connectTo(address)
 				except socket.error, why:
-					sys.stderr.write("Failed to setup connection to %s:%s, reason: %s" % (host,port,why) )
+					sys.stderr.write("Failed to setup connection to %s, reason: %s" % (address,why) )
 					return
 				self._addConnection(conn)
 			httpRequest.makeRelative()

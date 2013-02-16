@@ -17,7 +17,7 @@ import signal
 
 from multiprocessing import Process, JoinableQueue
 
-from net import Socket, Endpoint
+from net import Socket, Endpoint, Address
 from monitor import MonitorWorker
 from workers import SwitchWorker, ForwardingWorker, ProxyWorker
 
@@ -54,8 +54,8 @@ def main():
 	proxyList = []
 	for proxy in options.forward:
 		host, port = proxy.split(":")
-		proxyList.append((host,long(port)))
-	print("Will forward to: %s" % options.forward)
+		proxyList.append( Address(host, port))
+	print('Will forward to: %s' % options.forward)
 
 	signal.signal(signal.SIGTERM, signalHandler)
 

@@ -3,6 +3,20 @@ import sys
 
 from multiprocessing.reduction import reduce_socket
 
+class Address(object):
+	"""
+	Address abstraction, has host & port.
+	"""
+	host = None
+	port = None
+
+	def __init__(self, host, port):
+		self.host = host
+		self.port = long(port)
+
+	def __str__(self):
+		return "%s:%s" % (self.host,self.port)
+
 
 class Socket(socket.SocketType):
 	"""
@@ -52,8 +66,8 @@ class Endpoint(object):
 			self.socket.close()
 
 	def rebuild(self):
-		meth, args = self.socket
-		self.socket = meth(*args)
+		method, args = self.socket
+		self.socket = method(*args)
 		return self
 
 	def reduce(self):
@@ -61,10 +75,10 @@ class Endpoint(object):
 		return self
 
 	@staticmethod
-	def connectTo(host, port):
+	def connectTo(address):
 		realsocket = socket.socket(socket.AF_INET, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
-		realsocket.connect((host, port))
-		return Endpoint(realsocket, (host,port))
+		realsocket.connect((address.host, address.port))
+		return Endpoint(realsocket, (address.host, address.port))
 
 
 class Connection(object):
