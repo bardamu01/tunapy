@@ -92,7 +92,7 @@ def main():
 			proxyList.append( Address(host, port))
 	elif options.proxycfg:
 		if not os.path.isfile(options.proxycfg):
-			raise ValueError("Bad option value for %s: %s" % ("proxycfg", options.proxycfg))
+			raise ValueError("No such file: %s" % options.proxycfg)
 		cfgUpdater = ConfigUpdater(options.proxycfg, sharedConfig, statusQueue)
 		p = Process(target=cfgUpdater.work, args=())
 		processes.append(p)

@@ -48,12 +48,13 @@ class Endpoint(object):
 
 	def __init__(self, realsocket, address):
 		self.socket = realsocket
+		self.__reduced_socket = None
 		# might be redundant because of realsocket.getpeername()
 		# but at least we see host names not IPs
 		self.address = address
 
 	def __str__(self):
-		return "%s:%s [%d]" % (self.address[0], self.address[1], self.socket.fileno())
+		return "%s:%s" % (self.address[0], self.address[1])
 
 	def shutdown(self, msgToSend=None):
 		try:
@@ -66,12 +67,14 @@ class Endpoint(object):
 			self.socket.close()
 
 	def rebuild(self):
-		method, args = self.socket
+		method, args = self.__reduced_socket
 		self.socket = method(*args)
 		return self
 
 	def reduce(self):
-		self.socket = reduce_socket(self.socket)
+		if not self.__reduced_socket:
+			self.__reduced_socket = reduce_socket(self.socket)
+			self.socket = None
 		return self
 
 	@staticmethod

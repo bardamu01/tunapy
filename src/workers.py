@@ -109,64 +109,53 @@ class SwitchWorker(Worker):
 		Worker.work(self)
 		while self.running:
 			client = self.connectRequestsQueue.get()
-			client.rebuild()
 			self.say("New client: %s " % client)
 			while self.running:
-				buf = client.socket.recv(BUFFER_SIZE)
-				if buf:
-					self.say("Received %s" % buf)
-					proxy = self.__getProxy()
-					if proxy:
-						if proxy is None:
-							self.say("Could not find a suitable proxy, shutting down connection to %s" % client)
-							client.shutdown()
-							break
-						self.say("Forwarding to next proxy: %s" % str(proxy))
+				proxy = self.__getProxy()
+				if proxy:
+					self.say("Forwarding to next proxy: %s" % str(proxy))
+					self.forwardingQueue.put( Connection(client, proxy).reduce())
+					break
+				else: # direct connection
+					client.rebuild()
+					buf = client.socket.recv(BUFFER_SIZE)
+					self.say("Received %s from %s " % (buf ,client))
+					if not buf:
+						client.shutdown()
+						break
+					httpRequest = HttpRequest.buildFromBuffer(buf)
+					if httpRequest.requestType == "CONNECT":
+						host, port = httpRequest.requestedResource.split(":")
+						self.say("Tunneling to: %s:%s" % (host, port))
 						try:
-							proxy.socket.sendall(buf)
+							server = Endpoint.connectTo(Address(host, port))
 						except socket.error, why:
 							sys.stderr.write(why.message + "\n")
 							client.shutdown()
 							break
-						self.forwardingQueue.put( Connection(client, proxy).reduce())
+
+						client.socket.sendall("HTTP/1.1 200 Connection established\r\nProxy-Agent: TunaPy/0.1\r\n\r\n")
+						self.forwardingQueue.put( Connection(client, server).reduce())
 						break
-					else: # direct connection
-						httpRequest = HttpRequest.buildFromBuffer(buf)
-						if httpRequest.requestType == "CONNECT":
-							host, port = httpRequest.requestedResource.split(":")
-							self.say("Tunneling to: %s:%s" % (host, port))
-							try:
-								server = Endpoint.connectTo(Address(host, port))
-							except socket.error, why:
-								sys.stderr.write(why.message + "\n")
-								client.shutdown()
-								break
-
-							client.socket.sendall("HTTP/1.1 200 Connection established\r\nProxy-Agent: TunaPy/0.1\r\n\r\n")
-							self.forwardingQueue.put( Connection(client, server).reduce())
+					else:
+						httpRequest.makeRelative()
+						host = httpRequest.options['Host']
+						port = 80
+						address = Address(host, port)
+						self.say('Sending to %s' % address)
+						try:
+							server = Endpoint.connectTo(address)
+							# resend the client HTTP request to the server
+							self.say("Sending: %s" % httpRequest.toBuffer())
+							server.socket.sendall(httpRequest.toBuffer())
+						except socket.error, why:
+							sys.stderr.write('An error occurred:\n%s\n' % why.message)
+							client.shutdown()
 							break
-						else:
-							httpRequest.makeRelative()
-							host = httpRequest.options['Host']
-							port = 80
-							address = Address(host, port)
-							self.say('Sending to %s' % address)
-							try:
-								server = Endpoint.connectTo(address)
-								# resend the client HTTP request to the server
-								self.say("Sending: %s" % httpRequest.toBuffer())
-								server.socket.sendall(httpRequest.toBuffer())
-							except socket.error, why:
-								sys.stderr.write('An error occurred:\n%s\n' % why.message)
-								client.shutdown()
-								break
 
-							self.say("Proxying queue size: %d" % self.proxyingQueue.qsize())
-							self.proxyingQueue.put( Connection(client, server).reduce())
-							break
-				else:
-					client.shutdown()
-					break
+						self.say("Proxying queue size: %d" % self.proxyingQueue.qsize())
+						self.proxyingQueue.put( Connection(client, server).reduce())
+						break
 
 		self.forwardingQueue.join()
 		self.quit()
@@ -271,7 +260,7 @@ class ForwardingWorker(ConnectionWorker):
 	_name = "Tunnel worker"
 
 	def __init__(self, name, newConnectionsQueue, statusQueue=None):
-		ConnectionWorker.__init__(self, name, newConnectionsQueue, statusQueue=None)
+		ConnectionWorker.__init__(self, name, newConnectionsQueue, statusQueue=statusQueue)
 
 	def _processBuffer(self, readable, buf):
 		try:
