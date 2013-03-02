@@ -1,3 +1,5 @@
+import ConfigParser
+from StringIO import StringIO
 import os
 import sys
 import socket
@@ -18,6 +20,7 @@ class Worker(object):
 	_name = "Base worker"
 	running = False
 	statusQueue = None
+	sharedConfig = None
 
 	def __init__(self, name, statusQueue=None):
 		self.name = "%s %s" % (self._name, name)
@@ -40,6 +43,22 @@ class Worker(object):
 	def quit(self):
 		# TODO: need to close all connections on exit
 		self.say("Quitting...")
+
+	_parsedConfig = None
+	def getConfig(self):
+		"""
+		Returns a ConfigParser object. Only updates if the shared config changes.
+		"""
+		if self.sharedConfig:
+			if not self._parsedConfig:
+				self._parsedConfig = ConfigParser.ConfigParser()
+				self._parsedConfig.readfp(StringIO(self.sharedConfig.value))
+				self.__olderConfig = self.sharedConfig.value
+			else:
+				if self.sharedConfig.value != self.__olderConfig:
+					self.say("Picked up new config")
+					self._parsedConfig.readfp(StringIO(self.sharedConfig.value))
+			return self._parsedConfig
 
 
 class SwitchWorker(Worker):
@@ -75,14 +94,13 @@ class SwitchWorker(Worker):
 		"""
 		Tries to find a reachable proxy. Makes it first proxy if found.
 		"""
-		for proxy in self.proxyList:
+		proxyList = []
+		if self.sharedConfig:
+			host,port = self.getConfig().get("config", "forward").split(':')
+			proxyList.append(Address(host,port))
+		for proxy in self.proxyList + proxyList:
 			try:
-				ret = Endpoint.connectTo(proxy)
-				if proxy != self.proxyList[0]:
-					self.say("Making %s first proxy" % str(proxy))
-					self.proxyList.remove(proxy)
-					self.proxyList = [proxy] + self.proxyList
-				return ret
+				return Endpoint.connectTo(proxy)
 			except socket.error:
 				self.say("Failed to connect to proxy %s" % str(proxy))
 		return None
@@ -97,8 +115,8 @@ class SwitchWorker(Worker):
 				buf = client.socket.recv(BUFFER_SIZE)
 				if buf:
 					self.say("Received %s" % buf)
-					if self.proxyList: # using another proxy
-						proxy = self.__getProxy()
+					proxy = self.__getProxy()
+					if proxy:
 						if proxy is None:
 							self.say("Could not find a suitable proxy, shutting down connection to %s" % client)
 							client.shutdown()
@@ -132,7 +150,7 @@ class SwitchWorker(Worker):
 							host = httpRequest.options['Host']
 							port = 80
 							address = Address(host, port)
-							self.say('Proxying to %s:%d' % address)
+							self.say('Sending to %s' % address)
 							try:
 								server = Endpoint.connectTo(address)
 								# resend the client HTTP request to the server

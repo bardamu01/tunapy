@@ -11,15 +11,17 @@ Architecture:
 
 """
 from optparse import OptionParser
+import os
 import sys
 import socket
 import signal
 
-from multiprocessing import Process, JoinableQueue
+from multiprocessing import Process, JoinableQueue, Array
+import time
 
 from net import Socket, Endpoint, Address
 from monitor import MonitorWorker
-from workers import SwitchWorker, ForwardingWorker, ProxyWorker
+from workers import SwitchWorker, ForwardingWorker, ProxyWorker, Worker
 
 LISTEN_ADDRESS = '127.0.0.1'
 LISTEN_PORT = 8888
@@ -44,6 +46,32 @@ class ProxyOptions(OptionParser):
 		self.add_option("-f", "--forward", metavar="HOST:PORT",
 						default=[], action="append",
 						help="forward to the next proxy server")
+		self.add_option("-P", "--proxycfg", metavar="FILE",
+						type=str, default=None,
+						help="file that contains the proxy configuration")
+
+
+class ConfigUpdater(Worker):
+	"""
+	Updates the shared configuration from a file.
+	"""
+
+	def __init__(self, config, sharedConfig, statusQueue):
+		Worker.__init__(self, 'Config updater', statusQueue)
+		self.configFile = config
+		self.sharedConfig = sharedConfig
+
+	def work(self):
+		Worker.work(self)
+		oldRawConfig = ""
+		while self.running:
+			rawConfig = open(self.configFile).read()
+			if rawConfig != oldRawConfig:
+				self.say("Updating config to: %s" % rawConfig)
+				self.sharedConfig.value = rawConfig
+				oldRawConfig = rawConfig
+			#TODO: replace this with an event
+			time.sleep(10)
 
 
 def main():
@@ -51,20 +79,33 @@ def main():
 	listenAddress = options.listen or LISTEN_ADDRESS
 	listenPort = options.port or LISTEN_PORT
 
+	statusQueue = JoinableQueue(20)
+	sharedConfig = Array('c', 100)
+
+	processes = []
+
 	proxyList = []
-	for proxy in options.forward:
-		host, port = proxy.split(":")
-		proxyList.append( Address(host, port))
-	print('Will forward to: %s' % options.forward)
+	if options.forward:
+		print('Will forward to: %s' % options.forward)
+		for proxy in options.forward:
+			host, port = proxy.split(":")
+			proxyList.append( Address(host, port))
+	elif options.proxycfg:
+		if not os.path.isfile(options.proxycfg):
+			raise ValueError("Bad option value for %s: %s" % ("proxycfg", options.proxycfg))
+		cfgUpdater = ConfigUpdater(options.proxycfg, sharedConfig, statusQueue)
+		p = Process(target=cfgUpdater.work, args=())
+		processes.append(p)
+		p.start()
+
+	print('Forwarding to proxies: %s' % str(proxyList))
 
 	signal.signal(signal.SIGTERM, signalHandler)
 
 	connectRequestsQueue = JoinableQueue(20)
 	forwardingQueue = JoinableQueue(20)
 	proxyingQueue = JoinableQueue(20)
-	statusQueue = JoinableQueue(20)
 
-	processes = []
 	print("Starting workers...")
 	workers = [ SwitchWorker("Adam", connectRequestsQueue, forwardingQueue, proxyingQueue),
 				ForwardingWorker("Fred", forwardingQueue),
@@ -78,6 +119,7 @@ def main():
 		if isinstance(worker, SwitchWorker):
 			worker.proxyList = proxyList
 		worker.statusQueue = statusQueue
+		worker.sharedConfig = sharedConfig
 		p = Process(target=worker.work, args=())
 		processes.append(p)
 		p.start()
