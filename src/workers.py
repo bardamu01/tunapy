@@ -1,9 +1,10 @@
-import ConfigParser
-from StringIO import StringIO
 import os
 import sys
 import socket
 import select
+
+import ConfigParser
+from StringIO import StringIO
 from Queue import Empty
 from httputil import HttpRequest
 
@@ -81,8 +82,6 @@ class SwitchWorker(Worker):
 
 	_name = "Switch worker"
 	proxyList = []
-
-	HTTP_CONNECTION_FAILED = "HTTP/1.1 404 Connection failed\r\n\r\n"
 
 	def __init__(self, name, connectRequestsQueue, forwardingQueue, proxyingQueue, statusQueue=None):
 		Worker.__init__(self, name, statusQueue)

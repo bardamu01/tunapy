@@ -10,14 +10,15 @@ Architecture:
 * several workers forward the packets. One worker can serve multiple connections.
 
 """
-from optparse import OptionParser
 import os
 import sys
 import socket
 import signal
+import time
+
+from optparse import OptionParser
 
 from multiprocessing import Process, JoinableQueue, Array
-import time
 
 from net import Socket, Endpoint, Address
 from monitor import MonitorWorker
