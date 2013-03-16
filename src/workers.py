@@ -109,52 +109,51 @@ class SwitchWorker(Worker):
 		while self.running:
 			client = self.connectRequestsQueue.get()
 			self.say("New client: %s " % client)
-			while self.running:
-				proxy = self.__getProxy()
-				if proxy:
-					self.say("Forwarding to next proxy: %s" % str(proxy))
-					self.forwardingQueue.put( Connection(client, proxy).reduce())
-					break
-				else: # direct connection
-					client.rebuild()
-					buf = client.socket.recv(BUFFER_SIZE)
-					self.say("Received %s from %s " % (buf ,client))
-					if not buf:
+			proxy = self.__getProxy()
+			if proxy:
+				self.say("Forwarding to next proxy: %s" % str(proxy))
+				self.forwardingQueue.put( Connection(client, proxy).reduce())
+				continue
+			else: # direct connection
+				client.rebuild()
+				buf = client.socket.recv(BUFFER_SIZE)
+				self.say("Received %s from %s " % (buf ,client))
+				if not buf:
+					client.shutdown()
+					continue
+				httpRequest = HttpRequest.buildFromBuffer(buf)
+				if httpRequest.requestType == "CONNECT":
+					host, port = httpRequest.requestedResource.split(":")
+					self.say("Tunneling to: %s:%s" % (host, port))
+					try:
+						server = Endpoint.connectTo(Address(host, port))
+					except socket.error, why:
+						sys.stderr.write(why.message + "\n")
 						client.shutdown()
-						break
-					httpRequest = HttpRequest.buildFromBuffer(buf)
-					if httpRequest.requestType == "CONNECT":
-						host, port = httpRequest.requestedResource.split(":")
-						self.say("Tunneling to: %s:%s" % (host, port))
-						try:
-							server = Endpoint.connectTo(Address(host, port))
-						except socket.error, why:
-							sys.stderr.write(why.message + "\n")
-							client.shutdown()
-							break
+						continue
 
-						client.socket.sendall("HTTP/1.1 200 Connection established\r\nProxy-Agent: TunaPy/0.1\r\n\r\n")
-						self.forwardingQueue.put( Connection(client, server).reduce())
-						break
-					else:
-						httpRequest.makeRelative()
-						host = httpRequest.options['Host']
-						port = 80
-						address = Address(host, port)
-						self.say('Sending to %s' % address)
-						try:
-							server = Endpoint.connectTo(address)
-							# resend the client HTTP request to the server
-							self.say("Sending: %s" % httpRequest.toBuffer())
-							server.socket.sendall(httpRequest.toBuffer())
-						except socket.error, why:
-							sys.stderr.write('An error occurred:\n%s\n' % why.message)
-							client.shutdown()
-							break
+					client.socket.sendall("HTTP/1.1 200 Connection established\r\nProxy-Agent: TunaPy/0.1\r\n\r\n")
+					self.forwardingQueue.put( Connection(client, server).reduce())
+					continue
+				else:
+					httpRequest.makeRelative()
+					host = httpRequest.options['Host']
+					port = 80
+					address = Address(host, port)
+					self.say('Sending to %s' % address)
+					try:
+						server = Endpoint.connectTo(address)
+						# resend the client HTTP request to the server
+						self.say("Sending: %s" % httpRequest.toBuffer())
+						server.socket.sendall(httpRequest.toBuffer())
+					except socket.error, why:
+						sys.stderr.write('An error occurred:\n%s\n' % why.message)
+						client.shutdown()
+						continue
 
-						self.say("Proxying queue size: %d" % self.proxyingQueue.qsize())
-						self.proxyingQueue.put( Connection(client, server).reduce())
-						break
+					self.say("Proxying queue size: %d" % self.proxyingQueue.qsize())
+					conn = Connection(client, server).reduce()
+					self.proxyingQueue.put(conn)
 
 		self.forwardingQueue.join()
 		self.quit()
