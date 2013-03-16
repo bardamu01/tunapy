@@ -48,10 +48,10 @@ class Endpoint(object):
 
 	def __init__(self, realsocket, address):
 		self.socket = realsocket
-		self.__reduced_socket = None
 		# might be redundant because of realsocket.getpeername()
 		# but at least we see host names not IPs
 		self.address = address
+		self._isReduced = False
 
 	def __str__(self):
 		return "%s:%s" % (self.address[0], self.address[1])
@@ -67,14 +67,15 @@ class Endpoint(object):
 			self.socket.close()
 
 	def rebuild(self):
-		method, args = self.__reduced_socket
+		method, args = self.socket
 		self.socket = method(*args)
+		self._isReduced = False
 		return self
 
 	def reduce(self):
-		if not self.__reduced_socket:
-			self.__reduced_socket = reduce_socket(self.socket)
-			self.socket = None
+		if not self._isReduced:
+			self.socket = reduce_socket(self.socket)
+			self._isReduced = True
 		return self
 
 	@staticmethod
