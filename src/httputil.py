@@ -36,12 +36,15 @@ class HttpRequest(object):
 		return httpRequest
 
 	def makeRelative(self):
-		rr = self.requestedResource
-		pos = rr.find("://")
+		rsc = self.requestedResource
+		pos = rsc.find("://")
 		if pos < 0:
 			return
-		uri = rr[pos+3:]
-		self.requestedResource = uri[uri.find("/"):]
+		uri = rsc[pos+3:]
+		if "/" in uri:
+			self.requestedResource = uri[uri.find("/"):]
+		else:
+			self.requestedResource = "/"
 
 	def toBuffer(self):
 		lines  = ["%s %s %s" % (self.requestType, self.requestedResource, self.protocol)]

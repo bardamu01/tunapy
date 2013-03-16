@@ -6,7 +6,7 @@ class TestHttpRequest(unittest.TestCase):
 
 
 	def setUp(self):
-		self.buffer ="""GET http://www.serbanradulescu.ro/new/proiectele-mele/ HTTP/1.1\r
+		self.buffer ="""GET http://www.xulescu.ro/new/proiectele-mele HTTP/1.1\r
 Host: www.serbanradulescu.ro\r
 User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:17.0) Gecko/20100101 Firefox/17.0\r
 Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r
@@ -21,13 +21,22 @@ Cache-Control: max-age=0\r\n\r\n"""
 	def test_buildFromBuffer(self):
 		httpRequest = self.httpRequest
 		self.assertEquals("GET", httpRequest.requestType)
-		self.assertEquals("http://www.serbanradulescu.ro/new/proiectele-mele/", httpRequest.requestedResource)
+		self.assertEquals("http://www.xulescu.ro/new/proiectele-mele", httpRequest.requestedResource)
 		self.assertTrue(httpRequest.options["Cache-Control"] == "max-age=0")
 
 	def test_makeRelative(self):
 		httpRequest = copy.copy(self.httpRequest)
 		httpRequest.makeRelative()
-		self.assertEquals("/new/proiectele-mele/", httpRequest.requestedResource)
+		self.assertEquals("/new/proiectele-mele", httpRequest.requestedResource)
+
+	def test_makeRelative_no_subpages(self):
+		httpRequest = HttpRequest.buildFromBuffer("""GET HTTP://www.google.ro HTTP/1.1\r
+User-Agent: curl/7.29.0\r
+Host: www.google.ro\r
+Accept: */*\r
+Proxy-Connection: Keep-Alive\r\n\r\n""")
+		httpRequest.makeRelative()
+		self.assertEquals("/", httpRequest.requestedResource)
 
 	def test_toBuffer(self):
 		self.assertEquals(self.httpRequest.toBuffer(), self.buffer)
