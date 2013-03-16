@@ -22,7 +22,7 @@ from multiprocessing import Process, JoinableQueue, Array
 
 from net import Socket, Endpoint, Address
 from monitor import MonitorWorker
-from workers import SwitchWorker, ForwardingWorker, ProxyWorker, Worker
+from workers import SwitchWorker, ForwardingWorker, DirectProxyWorker, Worker
 
 LISTEN_ADDRESS = '127.0.0.1'
 LISTEN_PORT = 8888
@@ -110,10 +110,10 @@ def main():
 	print("Starting workers...")
 	workers = [ SwitchWorker("Adam", connectRequestsQueue, forwardingQueue, proxyingQueue),
 				ForwardingWorker("Fred", forwardingQueue),
-				ProxyWorker("Perseus", proxyingQueue),
-				ProxyWorker("Penelope1", proxyingQueue),
-				ProxyWorker("Penelope2", proxyingQueue),
-				ProxyWorker("Penelope3", proxyingQueue),
+				DirectProxyWorker("Perseus", proxyingQueue),
+				DirectProxyWorker("Penelope1", proxyingQueue),
+				DirectProxyWorker("Penelope2", proxyingQueue),
+				DirectProxyWorker("Penelope3", proxyingQueue),
 				MonitorWorker("Mo"),
 			]
 	for worker in workers:

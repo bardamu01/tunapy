@@ -115,6 +115,7 @@ class SwitchWorker(Worker):
 				self.forwardingQueue.put( Connection(client, proxy).reduce())
 				continue
 			else: # direct connection
+				self.say("No proxy found, making direct connection")
 				client.rebuild()
 				buf = client.socket.recv(BUFFER_SIZE)
 				self.say("Received %s from %s " % (buf ,client))
@@ -268,7 +269,7 @@ class ForwardingWorker(ConnectionWorker):
 			self._closeConnection(conn, "Could not send buffer: %s" % why.message)
 
 
-class ProxyWorker(ConnectionWorker):
+class DirectProxyWorker(ConnectionWorker):
 	"""
 	Handles proxying HTTP 1.1 requests for multiple connections.
 
